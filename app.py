@@ -29,20 +29,20 @@ st.set_page_config(page_title="Reporte Regional - Encuestas", layout="wide")
 TIPOS_VALIDOS = ["Comunidad", "Comercio", "Policial"]
 
 REGIONES_CATALOGO = [
-    "Región 1 Norte",
-    "Región 1 Sur",
-    "Región 1 Central",
-    "Región 2",
-    "Región 3",
-    "Región 4",
-    "Región 5",
-    "Región 6",
-    "Región 7",
-    "Región 8",
-    "Región 9",
-    "Región 10",
-    "Región 11",
-    "Región 12",
+    "Región 1 San José Norte",
+    "Región 1 San José Sur",
+    "Región 1 San José Central",
+    "Región 2 Alajuela",
+    "Región 3 Cartago",
+    "Región 4 Heredia",
+    "Región 5 Chorotega",
+    "Región 6 Pacífico Central",
+    "Región 7 Brunca",
+    "Región 8 Huetar Norte",
+    "Región 9 Huetar Atlántica",
+    "Región 10 Brunca Sur",
+    "Región 11 Chorotega Norte",
+    "Región 12 Caribe",
 ]
 
 # Colores institucionales
@@ -537,4 +537,5 @@ if st.button("🧾 Generar informe PDF", type="primary"):
         file_name=f"Informe_{region_name.replace(' ', '_')}_Encuestas.pdf",
         mime="application/pdf"
     )
+
 
