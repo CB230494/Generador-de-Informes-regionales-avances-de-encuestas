@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
 import io
+import os
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 from PIL import Image
 
-# PDF text extraction
 from pypdf import PdfReader
 
-# PDF creation
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.platypus import (
@@ -24,17 +23,20 @@ from reportlab.lib.units import inch
 # =========================
 # Config
 # =========================
-st.set_page_config(page_title="Reporte Regional - Encuestas (PDF)", layout="wide")
-
-SEM_GREEN_MIN = 80  # >= 80% verde
-SEM_ORANGE_MIN = 40 # 40-79% naranja
-# < 40% rojo
+st.set_page_config(page_title="Reporte Regional - Encuestas", layout="wide")
 
 TIPOS_VALIDOS = ["Comunidad", "Comercio", "Policial"]
 
+# Colores institucionales (puedes ajustarlos)
+COLOR_VERDE = colors.HexColor("#1B5E20")
+COLOR_NARANJA = colors.HexColor("#E65100")
+COLOR_ROJO = colors.HexColor("#B71C1C")
+COLOR_ENCABEZADO = colors.HexColor("#263238")   # gris azulado oscuro
+COLOR_ENCABEZADO_2 = colors.HexColor("#37474F") # variante
+
 
 # =========================
-# Helpers - Parsing
+# Helpers - PDF to text
 # =========================
 @dataclass
 class ParsedHeader:
@@ -43,19 +45,15 @@ class ParsedHeader:
     hora: str
 
 
-def _extract_text_from_pdf(file_bytes: bytes) -> str:
+def extract_text_from_pdf(file_bytes: bytes) -> str:
     reader = PdfReader(io.BytesIO(file_bytes))
-    text_all = []
+    parts = []
     for page in reader.pages:
-        t = page.extract_text() or ""
-        text_all.append(t)
-    return "\n".join(text_all)
+        parts.append(page.extract_text() or "")
+    return "\n".join(parts)
 
 
-def _parse_header(text: str) -> ParsedHeader:
-    # Delegación: San Carlos Oeste
-    # Hora del reporte: 13:35
-    # Fecha: miércoles, 4 de marzo de 2026
+def parse_header(text: str) -> ParsedHeader:
     deleg = ""
     hora = ""
     fecha = ""
@@ -75,149 +73,106 @@ def _parse_header(text: str) -> ParsedHeader:
     return ParsedHeader(delegacion=deleg, fecha=fecha, hora=hora)
 
 
-def _section_lines(text: str, section_name: str) -> List[str]:
+def get_section_block(text: str, section_name: str) -> str:
     """
-    Extract lines between section_name and next section.
-    Sections in your PDFs appear as:
-    Comunidad
-    ...
-    Comercio
-    ...
-    Policial
-    ...
+    Devuelve el bloque de texto entre 'Comunidad' y el siguiente título (Comercio/Policial)
+    o hasta el final.
     """
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    idxs = {name: None for name in TIPOS_VALIDOS}
-    for i, ln in enumerate(lines):
-        for name in TIPOS_VALIDOS:
-            if ln.lower() == name.lower():
-                idxs[name] = i
+    # Normaliza saltos
+    t = text.replace("\r", "\n")
 
-    start = idxs.get(section_name)
-    if start is None:
-        return []
+    # Ubicar inicio sección
+    m_start = re.search(rf"\n{re.escape(section_name)}\n", t, re.IGNORECASE)
+    if not m_start:
+        # A veces viene sin \n inicial
+        m_start = re.search(rf"{re.escape(section_name)}\n", t, re.IGNORECASE)
+        if not m_start:
+            return ""
 
-    # find next section start after 'start'
-    next_starts = []
-    for name in TIPOS_VALIDOS:
-        j = idxs.get(name)
-        if j is not None and j > start:
-            next_starts.append(j)
-    end = min(next_starts) if next_starts else len(lines)
+    start_idx = m_start.end()
 
-    return lines[start + 1: end]
+    # Buscar el siguiente encabezado
+    next_idxs = []
+    for sec in TIPOS_VALIDOS:
+        if sec.lower() == section_name.lower():
+            continue
+        m_next = re.search(rf"\n{re.escape(sec)}\n", t[start_idx:], re.IGNORECASE)
+        if m_next:
+            next_idxs.append(start_idx + m_next.start())
+
+    end_idx = min(next_idxs) if next_idxs else len(t)
+    return t[start_idx:end_idx].strip()
 
 
-def _parse_table_lines(section: str, header: ParsedHeader, section_lines: List[str]) -> List[Dict]:
+def parse_table_block_robust(header: ParsedHeader, block_text: str) -> List[Dict]:
     """
-    Parses lines like:
-    Comunidad La Fortuna 155 6 4% 149
-    Comercio San Carlos Oeste 231 3 1% 228
-    Policial San Carlos Oeste 94 42 45% 52
+    Parser robusto: detecta filas aunque el PDF rompa líneas.
+    Reconoce patrones como:
+    Comunidad Belen De Nosarita 20 0 0% 20
+    Comercio Tilaran 74 17 23% 57
+    Policial Nicoya 125 14 11% 111
     """
     rows = []
-    if not section_lines:
+    if not block_text:
         return rows
 
-    # If section says "No hay registros..."
-    if any("no hay registros" in ln.lower() for ln in section_lines):
+    if re.search(r"No hay registros", block_text, re.IGNORECASE):
         return rows
 
-    # remove header line if present
-    # "Tipo Distrito Meta Contabilidad % Avance Pendiente"
-    cleaned = []
-    for ln in section_lines:
-        if re.search(r"Tipo\s+Distrito\s+Meta\s+Contabilidad", ln, re.IGNORECASE):
-            continue
-        cleaned.append(ln)
+    # compacta espacios
+    compact = " ".join(block_text.split())
 
-    for ln in cleaned:
-        # Only parse lines that begin with the section word or a known tipo
-        # In your PDFs: line starts with the same as section (Comunidad/Comercio/Policial)
-        toks = ln.split()
-        if len(toks) < 6:
-            continue
+    # regex para filas
+    matches = re.findall(
+        r"(Comunidad|Comercio|Policial)\s+"
+        r"([A-Za-zÁÉÍÓÚÑáéíóúñ\s]+?)\s+"
+        r"(\d+)\s+(\d+)\s+(\d+)%\s+(\d+)",
+        compact
+    )
 
-        tipo = toks[0].strip()
-        if tipo.lower() not in [t.lower() for t in TIPOS_VALIDOS]:
-            continue
-
-        # last tokens: Meta Contabilidad %Avance Pendiente
-        # Example: 155 6 4% 149
-        try:
-            pendiente = int(toks[-1])
-            avance_str = toks[-2]
-            contabilidad = int(toks[-3])
-            meta = int(toks[-4])
-            distrito = " ".join(toks[1:-4]).strip()
-        except Exception:
-            continue
-
-        # normalize percent
-        avance_pct = None
-        m = re.match(r"^([0-9]+)\s*%$", avance_str.strip())
-        if m:
-            avance_pct = float(m.group(1))
-        else:
-            # fallback if "4%" without space
-            m2 = re.search(r"([0-9]+)\s*%$", avance_str.strip())
-            avance_pct = float(m2.group(1)) if m2 else None
-
+    for tipo, distrito, meta, contab, pct, pendiente in matches:
         rows.append({
             "Delegación": header.delegacion,
             "Fecha": header.fecha,
             "Hora": header.hora,
-            "Tipo": tipo,
-            "Distrito": distrito,
-            "Meta": meta,
-            "Contabilidad": contabilidad,
-            "% Avance": avance_pct if avance_pct is not None else 0.0,
-            "Pendiente": pendiente,
+            "Tipo": tipo.strip(),
+            "Distrito": distrito.strip(),
+            "Meta": int(meta),
+            "Contabilidad": int(contab),
+            "% Avance": float(pct),
+            "Pendiente": int(pendiente),
         })
 
     return rows
 
 
 def parse_pdf_report(file_name: str, file_bytes: bytes) -> Tuple[ParsedHeader, pd.DataFrame]:
-    text = _extract_text_from_pdf(file_bytes)
-    header = _parse_header(text)
+    text = extract_text_from_pdf(file_bytes)
+    header = parse_header(text)
 
     all_rows = []
     for sec in TIPOS_VALIDOS:
-        lines = _section_lines(text, sec)
-        all_rows.extend(_parse_table_lines(sec, header, lines))
+        block = get_section_block(text, sec)
+        rows = parse_table_block_robust(header, block)
+        all_rows.extend(rows)
 
     df = pd.DataFrame(all_rows)
     if df.empty:
-        # Keep at least header info
-        df = pd.DataFrame(columns=["Delegación", "Fecha", "Hora", "Tipo", "Distrito", "Meta", "Contabilidad", "% Avance", "Pendiente"])
+        df = pd.DataFrame(columns=[
+            "Delegación", "Fecha", "Hora", "Tipo", "Distrito",
+            "Meta", "Contabilidad", "% Avance", "Pendiente"
+        ])
     df["Archivo"] = file_name
     return header, df
 
 
 # =========================
-# Helpers - Metrics & Semáforo
+# Helpers - Aggregations
 # =========================
-def semaforo_color(avance_pct: float):
-    if avance_pct >= SEM_GREEN_MIN:
-        return colors.HexColor("#1B5E20")  # verde oscuro
-    if avance_pct >= SEM_ORANGE_MIN:
-        return colors.HexColor("#E65100")  # naranja
-    return colors.HexColor("#B71C1C")      # rojo
-
-
-def semaforo_label(avance_pct: float) -> str:
-    if avance_pct >= SEM_GREEN_MIN:
-        return "ALTO"
-    if avance_pct >= SEM_ORANGE_MIN:
-        return "MEDIO"
-    return "BAJO"
-
-
 def agg_region_tipo(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Aggregate by Región + Tipo with weighted progress:
-    avance% = (sum(contabilidad)/sum(meta))*100
+    Consolidado por Región + Tipo.
+    % Avance ponderado = (sum(Contabilidad)/sum(Meta))*100
     """
     g = df.groupby(["Región", "Tipo"], dropna=False).agg(
         Meta=("Meta", "sum"),
@@ -226,7 +181,6 @@ def agg_region_tipo(df: pd.DataFrame) -> pd.DataFrame:
     ).reset_index()
 
     g["% Avance"] = g.apply(lambda r: (r["Contabilidad"] / r["Meta"] * 100.0) if r["Meta"] else 0.0, axis=1)
-    g["Semáforo"] = g["% Avance"].apply(semaforo_label)
     return g
 
 
@@ -236,15 +190,40 @@ def agg_region_delegacion_tipo(df: pd.DataFrame) -> pd.DataFrame:
         Contabilidad=("Contabilidad", "sum"),
         Pendiente=("Pendiente", "sum"),
     ).reset_index()
+
     g["% Avance"] = g.apply(lambda r: (r["Contabilidad"] / r["Meta"] * 100.0) if r["Meta"] else 0.0, axis=1)
-    g["Semáforo"] = g["% Avance"].apply(semaforo_label)
     return g
 
 
 # =========================
-# PDF Builder (ReportLab)
+# Helpers - Color rules
 # =========================
-def _rl_image_from_pil(pil_img: Image.Image, width_in: float = 1.2) -> RLImage:
+def color_por_porcentaje(p: float, verde_desde: float, naranja_desde: float):
+    """
+    Esto es el 'semaforo':
+    - Verde si p >= verde_desde
+    - Naranja si p >= naranja_desde
+    - Rojo si p < naranja_desde
+    """
+    if p >= verde_desde:
+        return COLOR_VERDE
+    if p >= naranja_desde:
+        return COLOR_NARANJA
+    return COLOR_ROJO
+
+
+def etiqueta_por_porcentaje(p: float, verde_desde: float, naranja_desde: float) -> str:
+    if p >= verde_desde:
+        return "ALTO"
+    if p >= naranja_desde:
+        return "MEDIO"
+    return "BAJO"
+
+
+# =========================
+# PDF Builder
+# =========================
+def rl_image_from_pil(pil_img: Image.Image, width_in: float = 1.15) -> RLImage:
     bio = io.BytesIO()
     pil_img.save(bio, format="PNG")
     bio.seek(0)
@@ -254,6 +233,10 @@ def _rl_image_from_pil(pil_img: Image.Image, width_in: float = 1.2) -> RLImage:
     return img
 
 
+def fmt_int(n: int) -> str:
+    return f"{int(n):,}".replace(",", ".")
+
+
 def build_pdf_report(
     df_detalle: pd.DataFrame,
     df_regional: pd.DataFrame,
@@ -261,27 +244,33 @@ def build_pdf_report(
     logo_pil: Optional[Image.Image],
     titulo: str,
     subtitulo: str,
+    verde_desde: float,
+    naranja_desde: float,
 ) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
 
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="H1", parent=styles["Heading1"], fontSize=16, spaceAfter=10))
-    styles.add(ParagraphStyle(name="H2", parent=styles["Heading2"], fontSize=12, spaceAfter=6))
+    styles.add(ParagraphStyle(name="H1x", parent=styles["Heading1"], fontSize=16, spaceAfter=8))
+    styles.add(ParagraphStyle(name="H2x", parent=styles["Heading2"], fontSize=12, spaceAfter=6))
     styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontSize=9, leading=11))
     styles.add(ParagraphStyle(name="Tiny", parent=styles["BodyText"], fontSize=8, leading=10))
 
     elems = []
 
-    # Header
+    # Encabezado con logo
     header_tbl = []
     if logo_pil:
-        header_tbl.append([_rl_image_from_pil(logo_pil, width_in=1.1),
-                           Paragraph(f"<b>{titulo}</b><br/>{subtitulo}", styles["H1"])])
+        header_tbl.append([
+            rl_image_from_pil(logo_pil, 1.1),
+            Paragraph(f"<b>{titulo}</b><br/>{subtitulo}", styles["H1x"])
+        ])
+        colw = [1.35 * inch, 5.65 * inch]
     else:
-        header_tbl.append([Paragraph(f"<b>{titulo}</b><br/>{subtitulo}", styles["H1"]), ""])
+        header_tbl.append([Paragraph(f"<b>{titulo}</b><br/>{subtitulo}", styles["H1x"])])
+        colw = [7.0 * inch]
 
-    t = Table(header_tbl, colWidths=[1.3 * inch, 5.7 * inch])
+    t = Table(header_tbl, colWidths=colw)
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LINEBELOW", (0, 0), (-1, -1), 1, colors.black),
@@ -290,27 +279,27 @@ def build_pdf_report(
     elems.append(t)
     elems.append(Spacer(1, 10))
 
-    # Resumen regional
-    elems.append(Paragraph("Resumen regional (Meta / Contabilidad / Pendiente / % Avance)", styles["H2"]))
+    # RESUMEN REGIONAL
+    elems.append(Paragraph("Resumen regional (Meta / Contabilidad / Pendiente / % Avance)", styles["H2x"]))
 
-    reg = df_regional.copy()
-    reg = reg.sort_values(["Región", "Tipo"])
+    reg = df_regional.copy().sort_values(["Región", "Tipo"])
+    reg["Semáforo"] = reg["% Avance"].apply(lambda p: etiqueta_por_porcentaje(float(p), verde_desde, naranja_desde))
 
-    data = [["Región", "Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Semáforo"]]
+    data = [["Región", "Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Estado"]]
     for _, r in reg.iterrows():
         data.append([
             str(r["Región"]),
             str(r["Tipo"]),
-            f'{int(r["Meta"]):,}'.replace(",", "."),
-            f'{int(r["Contabilidad"]):,}'.replace(",", "."),
-            f'{int(r["Pendiente"]):,}'.replace(",", "."),
-            f'{r["% Avance"]:.1f}%',
-            str(r["Semáforo"]),
+            fmt_int(r["Meta"]),
+            fmt_int(r["Contabilidad"]),
+            fmt_int(r["Pendiente"]),
+            f'{float(r["% Avance"]):.1f}%',
+            str(r["Semáforo"])
         ])
 
-    tbl = Table(data, repeatRows=1, colWidths=[1.6*inch, 1.0*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.8*inch])
+    tbl = Table(data, repeatRows=1, colWidths=[1.6*inch, 1.0*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.7*inch])
     style_cmds = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#263238")),
+        ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, 0), 9),
@@ -319,10 +308,11 @@ def build_pdf_report(
         ("FONTSIZE", (0, 1), (-1, -1), 9),
     ]
 
-    # semáforo color cell (last column)
+    # Colorear la última columna según % Avance
     for i in range(1, len(data)):
-        pct = float(reg.iloc[i-1]["% Avance"])
-        style_cmds.append(("BACKGROUND", (-1, i), (-1, i), semaforo_color(pct)))
+        p = float(reg.iloc[i-1]["% Avance"])
+        c = color_por_porcentaje(p, verde_desde, naranja_desde)
+        style_cmds.append(("BACKGROUND", (-1, i), (-1, i), c))
         style_cmds.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style_cmds.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
@@ -330,85 +320,84 @@ def build_pdf_report(
     elems.append(tbl)
     elems.append(Spacer(1, 12))
 
-    # Por región: detalle por delegación
-    regiones = [r for r in df_por_deleg["Región"].dropna().unique().tolist()]
-    regiones = sorted(regiones)
+    # PÁGINAS POR REGIÓN
+    regiones = sorted([r for r in df_por_deleg["Región"].dropna().unique().tolist() if str(r).strip()])
 
-    if not regiones:
-        elems.append(Paragraph("<i>No hay regiones asignadas aún. Asigne regiones en la app y vuelva a generar.</i>", styles["Small"]))
-    else:
-        for region in regiones:
-            elems.append(PageBreak())
-            elems.append(Paragraph(f"Región: {region}", styles["H1"]))
+    for region in regiones:
+        elems.append(PageBreak())
+        elems.append(Paragraph(f"Región: {region}", styles["H1x"]))
 
-            # Sub-resumen región
-            sub = df_regional[df_regional["Región"] == region].sort_values("Tipo")
-            sub_data = [["Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Semáforo"]]
-            for _, r in sub.iterrows():
-                sub_data.append([
-                    str(r["Tipo"]),
-                    f'{int(r["Meta"]):,}'.replace(",", "."),
-                    f'{int(r["Contabilidad"]):,}'.replace(",", "."),
-                    f'{int(r["Pendiente"]):,}'.replace(",", "."),
-                    f'{r["% Avance"]:.1f}%',
-                    str(r["Semáforo"])
-                ])
+        # Sub-resumen de la región
+        sub = reg[reg["Región"] == region].sort_values("Tipo")
+        sub_data = [["Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Estado"]]
+        for _, r in sub.iterrows():
+            sub_data.append([
+                str(r["Tipo"]),
+                fmt_int(r["Meta"]),
+                fmt_int(r["Contabilidad"]),
+                fmt_int(r["Pendiente"]),
+                f'{float(r["% Avance"]):.1f}%',
+                str(r["Semáforo"])
+            ])
 
-            sub_tbl = Table(sub_data, repeatRows=1, colWidths=[1.2*inch, 1.0*inch, 1.2*inch, 1.0*inch, 0.9*inch, 0.9*inch])
-            sub_style = [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#37474F")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ]
-            for i in range(1, len(sub_data)):
-                pct = float(sub.iloc[i-1]["% Avance"])
-                sub_style.append(("BACKGROUND", (-1, i), (-1, i), semaforo_color(pct)))
-                sub_style.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
-                sub_style.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
-            sub_tbl.setStyle(TableStyle(sub_style))
-            elems.append(sub_tbl)
-            elems.append(Spacer(1, 12))
+        sub_tbl = Table(sub_data, repeatRows=1, colWidths=[1.2*inch, 1.0*inch, 1.2*inch, 1.0*inch, 0.9*inch, 0.7*inch])
+        sub_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO_2),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ]
+        for i in range(1, len(sub_data)):
+            p = float(sub.iloc[i-1]["% Avance"])
+            c = color_por_porcentaje(p, verde_desde, naranja_desde)
+            sub_style.append(("BACKGROUND", (-1, i), (-1, i), c))
+            sub_style.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
+            sub_style.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
+        sub_tbl.setStyle(TableStyle(sub_style))
+        elems.append(sub_tbl)
+        elems.append(Spacer(1, 12))
 
-            # Tabla por delegación y tipo
-            det = df_por_deleg[df_por_deleg["Región"] == region].copy()
-            det = det.sort_values(["Delegación", "Tipo"])
-            det_data = [["Delegación", "Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Semáforo"]]
-            for _, r in det.iterrows():
-                det_data.append([
-                    str(r["Delegación"]),
-                    str(r["Tipo"]),
-                    f'{int(r["Meta"]):,}'.replace(",", "."),
-                    f'{int(r["Contabilidad"]):,}'.replace(",", "."),
-                    f'{int(r["Pendiente"]):,}'.replace(",", "."),
-                    f'{r["% Avance"]:.1f}%',
-                    str(r["Semáforo"])
-                ])
+        # Detalle por delegación
+        det = df_por_deleg[df_por_deleg["Región"] == region].copy().sort_values(["Delegación", "Tipo"])
+        det["Estado"] = det["% Avance"].apply(lambda p: etiqueta_por_porcentaje(float(p), verde_desde, naranja_desde))
 
-            det_tbl = Table(det_data, repeatRows=1, colWidths=[2.0*inch, 0.9*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.8*inch])
-            det_style = [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#263238")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ]
-            for i in range(1, len(det_data)):
-                pct = float(det.iloc[i-1]["% Avance"])
-                det_style.append(("BACKGROUND", (-1, i), (-1, i), semaforo_color(pct)))
-                det_style.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
-                det_style.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
-            det_tbl.setStyle(TableStyle(det_style))
-            elems.append(det_tbl)
-            elems.append(Spacer(1, 12))
+        det_data = [["Delegación", "Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Estado"]]
+        for _, r in det.iterrows():
+            det_data.append([
+                str(r["Delegación"]),
+                str(r["Tipo"]),
+                fmt_int(r["Meta"]),
+                fmt_int(r["Contabilidad"]),
+                fmt_int(r["Pendiente"]),
+                f'{float(r["% Avance"]):.1f}%',
+                str(r["Estado"])
+            ])
 
-            # Nota metodológica
-            elems.append(Paragraph(
-                "Nota: El % de avance se calcula como (Contabilidad total / Meta total) × 100, ponderado por la meta.",
-                styles["Tiny"]
-            ))
+        det_tbl = Table(det_data, repeatRows=1, colWidths=[2.0*inch, 0.9*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.7*inch])
+        det_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]
+        for i in range(1, len(det_data)):
+            p = float(det.iloc[i-1]["% Avance"])
+            c = color_por_porcentaje(p, verde_desde, naranja_desde)
+            det_style.append(("BACKGROUND", (-1, i), (-1, i), c))
+            det_style.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
+            det_style.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
+        det_tbl.setStyle(TableStyle(det_style))
+        elems.append(det_tbl)
+        elems.append(Spacer(1, 10))
+
+        elems.append(Paragraph(
+            "Criterio de color (institucional): Verde = avance alto, Naranja = avance medio, Rojo = avance bajo. "
+            "Rangos configurables en la app.",
+            styles["Tiny"]
+        ))
 
     doc.build(elems)
     pdf_bytes = buf.getvalue()
@@ -422,31 +411,38 @@ def build_pdf_report(
 st.title("📄 Reporte Regional – Encuestas (Comunidad / Comercio / Policial)")
 
 with st.sidebar:
-    st.header("Configuración")
-    titulo = st.text_input("Título del informe", value="Informe de Avance Regional – Encuestas")
+    st.header("Configuración del informe")
+    titulo = st.text_input("Título del informe", value="Reporte Regional – Avance de Encuestas")
     subtitulo = st.text_input("Subtítulo", value="Comunidad / Comercio / Policial")
 
     st.markdown("---")
-    st.subheader("Logo (PNG/JPG)")
-    logo_file = st.file_uploader("Cargar logo", type=["png", "jpg", "jpeg"], accept_multiple_files=False)
+    st.subheader("Logo")
+    st.caption("Si existe '001.png' en el repo, se carga solo. También puedes subir otro logo aquí.")
+
     logo_img = None
+
+    # 1) Intentar cargar logo del repo
+    if os.path.exists("001.png"):
+        try:
+            logo_img = Image.open("001.png").convert("RGBA")
+            st.image(logo_img, caption="Logo (001.png) detectado en el repo", use_container_width=True)
+        except Exception:
+            st.warning("Encontré 001.png pero no pude abrirlo. Subí el logo manualmente.")
+
+    # 2) Upload opcional (reemplaza)
+    logo_file = st.file_uploader("Subir logo (opcional)", type=["png", "jpg", "jpeg"], accept_multiple_files=False)
     if logo_file:
         try:
             logo_img = Image.open(logo_file).convert("RGBA")
-            st.image(logo_img, caption="Logo cargado", use_container_width=True)
+            st.image(logo_img, caption="Logo cargado manualmente", use_container_width=True)
         except Exception:
-            st.warning("No pude leer el logo. Intente con PNG/JPG.")
+            st.warning("No pude leer el logo subido.")
 
     st.markdown("---")
-    st.subheader("Semáforo de avance")
-    c1, c2 = st.columns(2)
-    with c1:
-        green_min = st.number_input("Verde desde (%)", min_value=0, max_value=100, value=SEM_GREEN_MIN, step=1)
-    with c2:
-        orange_min = st.number_input("Naranja desde (%)", min_value=0, max_value=100, value=SEM_ORANGE_MIN, step=1)
-    # Update globals locally (simple approach)
-    SEM_GREEN_MIN = float(green_min)
-    SEM_ORANGE_MIN = float(orange_min)
+    st.subheader("Colores por % de avance")
+    st.caption("Esto solo pinta las celdas del PDF (verde/naranja/rojo).")
+    verde_desde = st.number_input("Verde desde (%)", min_value=0, max_value=100, value=80, step=1)
+    naranja_desde = st.number_input("Naranja desde (%)", min_value=0, max_value=100, value=40, step=1)
 
 st.markdown("### 1) Suba los PDFs de reporte por delegación")
 pdf_files = st.file_uploader(
@@ -456,19 +452,17 @@ pdf_files = st.file_uploader(
 )
 
 if not pdf_files:
-    st.info("Suba los PDFs para empezar. (Formato como los reportes que ya estás generando).")
+    st.info("Suba los PDFs para empezar.")
     st.stop()
 
 # Parse PDFs
 all_dfs = []
-headers = []
 parse_errors = []
 
 for f in pdf_files:
     try:
         b = f.read()
-        header, df = parse_pdf_report(f.name, b)
-        headers.append(header)
+        _, df = parse_pdf_report(f.name, b)
         all_dfs.append(df)
     except Exception as e:
         parse_errors.append((f.name, str(e)))
@@ -480,21 +474,19 @@ if parse_errors:
 
 df_all = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
 
-# Show parsed
 st.markdown("### 2) Datos detectados (desde los PDFs)")
 if df_all.empty:
-    st.warning("No se detectaron filas de tablas en los PDFs. Revise que el PDF tenga texto (no imagen).")
+    st.warning("No se detectaron filas. (Esto suele pasar si el PDF viene como imagen escaneada).")
     st.stop()
 
-# Build region assignment table
-delegaciones = sorted(df_all["Delegación"].dropna().unique().tolist())
-st.markdown("### 3) Asignación de Región (manual)")
-st.caption("Edite la columna Región para cada delegación. Luego genere el PDF consolidado.")
+st.success(f"Filas detectadas: {len(df_all)}")
+st.dataframe(df_all.sort_values(["Delegación", "Tipo", "Distrito"]), use_container_width=True, height=320)
 
-# create editable mapping
+# Asignación de Región
+st.markdown("### 3) Asignación de Región (manual)")
+delegaciones = sorted(df_all["Delegación"].dropna().unique().tolist())
 map_df = pd.DataFrame({"Delegación": delegaciones, "Región": [""] * len(delegaciones)})
 
-# try to keep prior edits in session
 if "region_map" in st.session_state:
     prev = st.session_state["region_map"]
     map_df = map_df.merge(prev, on="Delegación", how="left", suffixes=("", "_prev"))
@@ -507,66 +499,46 @@ edited = st.data_editor(
     num_rows="fixed",
     column_config={
         "Delegación": st.column_config.TextColumn(disabled=True),
-        "Región": st.column_config.TextColumn(help="Ej: Región Huetar Norte, Región 2 Alajuela, etc.")
+        "Región": st.column_config.TextColumn(help="Ej: Chorotega, Huetar Norte, Región 2 Alajuela, etc.")
     }
 )
-
 st.session_state["region_map"] = edited.copy()
 
-# Merge regions into df_all
 df = df_all.merge(edited, on="Delegación", how="left")
+df["Región"] = df["Región"].fillna("").astype(str).str.strip()
 
-# Validate
-missing_region = df["Región"].isna().sum() + (df["Región"].astype(str).str.strip() == "").sum()
-if missing_region > 0:
-    st.warning("Hay delegaciones sin Región asignada. Puede generar igual, pero el informe quedará incompleto por región.")
+missing = (df["Región"] == "").sum()
+if missing > 0:
+    st.warning("Hay delegaciones sin región asignada. El PDF solo consolidará lo que tenga región.")
 
-# Metrics
-st.markdown("### 4) Resumen (en pantalla)")
+df_use = df[df["Región"] != ""].copy()
+if df_use.empty:
+    st.info("Asigne al menos una región para generar el PDF.")
+    st.stop()
 
-df_valid = df.copy()
-df_valid["Región"] = df_valid["Región"].fillna("").astype(str).str.strip()
+# Resumen en pantalla
+st.markdown("### 4) Resumen regional (pantalla)")
+df_reg = agg_region_tipo(df_use)
+df_deleg = agg_region_delegacion_tipo(df_use)
 
-df_reg = agg_region_tipo(df_valid[df_valid["Región"] != ""]) if (df_valid["Región"] != "").any() else pd.DataFrame()
-df_deleg = agg_region_delegacion_tipo(df_valid[df_valid["Región"] != ""]) if (df_valid["Región"] != "").any() else pd.DataFrame()
+df_reg_show = df_reg.copy()
+df_reg_show["Estado"] = df_reg_show["% Avance"].apply(lambda p: etiqueta_por_porcentaje(float(p), float(verde_desde), float(naranja_desde)))
+st.dataframe(df_reg_show.sort_values(["Región", "Tipo"]), use_container_width=True)
 
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("Delegaciones detectadas", len(delegaciones))
-with c2:
-    st.metric("Regiones con datos", df_valid[df_valid["Región"] != ""]["Región"].nunique())
-with c3:
-    st.metric("Filas de detalle", len(df_valid))
-
-st.dataframe(df_valid.sort_values(["Delegación", "Tipo", "Distrito"]), use_container_width=True, height=320)
-
-if not df_reg.empty:
-    st.markdown("#### Resumen regional por tipo")
-    st.dataframe(df_reg.sort_values(["Región", "Tipo"]), use_container_width=True)
-
-# Generate PDF
+# Generar PDF
 st.markdown("### 5) Generar PDF consolidado")
 
-colA, colB = st.columns([1, 2])
-with colA:
-    generar = st.button("🧾 Generar informe PDF", type="primary")
-with colB:
-    st.caption("El PDF incluye: portada simple con logo + resumen regional + páginas por región con detalle por delegación y semáforo.")
-
-if generar:
-    if df_valid[df_valid["Región"] != ""].empty:
-        st.error("Asigne al menos una región (columna Región) para poder consolidar.")
-        st.stop()
-
+if st.button("🧾 Generar informe PDF", type="primary"):
     pdf_bytes = build_pdf_report(
-        df_detalle=df_valid[df_valid["Región"] != ""].copy(),
-        df_regional=df_reg.copy(),
-        df_por_deleg=df_deleg.copy(),
+        df_detalle=df_use,
+        df_regional=df_reg,
+        df_por_deleg=df_deleg,
         logo_pil=logo_img,
         titulo=titulo,
-        subtitulo=subtitulo
+        subtitulo=subtitulo,
+        verde_desde=float(verde_desde),
+        naranja_desde=float(naranja_desde),
     )
-
     st.success("PDF generado.")
     st.download_button(
         "⬇️ Descargar informe PDF",
