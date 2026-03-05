@@ -1,587 +1,577 @@
-# app.py — Pareto con gráfico 80/20 real + Portafolio + Unificado + Sheets DB (fixes)
-# -----------------------------------------------------------------------------------
-# Requisitos:
-#   pip install streamlit pandas matplotlib xlsxwriter gspread google-auth
-#   streamlit run app.py
-# -----------------------------------------------------------------------------------
-
+# -*- coding: utf-8 -*-
 import io
-from typing import List, Dict
+import re
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
+from PIL import Image
 
-# ====== Google Sheets (DB) ======
-import gspread
-from google.oauth2.service_account import Credentials
+# PDF text extraction
+from pypdf import PdfReader
 
-# URL de tu hoja (DB)
-SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1cf-avzRjtBXcqr69WfrrsTAegm0PMAe8LgjeLpfcS5g/edit?usp=sharing"
-WS_PARETOS = "paretos"  # hoja donde se guardan los paretos (nombre, descriptor, frecuencia)
+# PDF creation
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, PageBreak
+)
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
 
-st.set_page_config(page_title="Pareto de Descriptores", layout="wide")
 
-# ============================================================================
-# 1) CATÁLOGO EMBEBIDO
-# ============================================================================
-CATALOGO: List[Dict[str, str]] = [
-    {"categoria": "Delito", "descriptor": "Abandono de personas (menor de edad, adulto mayor o con capacidades diferentes)"},
-    {"categoria": "Delito", "descriptor": "Abigeato (robo y destace de ganado)"},
-    {"categoria": "Delito", "descriptor": "Aborto"},
-    {"categoria": "Delito", "descriptor": "Abuso de autoridad"},
-    {"categoria": "Riesgo social", "descriptor": "Accidentes de tránsito"},
-    {"categoria": "Delito", "descriptor": "Accionamiento de arma de fuego (balaceras)"},
-    {"categoria": "Riesgo social", "descriptor": "Acoso escolar (bullying)"},
-    {"categoria": "Riesgo social", "descriptor": "Acoso laboral (mobbing)"},
-    {"categoria": "Riesgo social", "descriptor": "Acoso sexual callejero"},
-    {"categoria": "Riesgo social", "descriptor": "Actos obscenos en vía pública"},
-    {"categoria": "Delito", "descriptor": "Administración fraudulenta, apropiaciones indebidas o enriquecimiento ilícito"},
-    {"categoria": "Delito", "descriptor": "Agresión con armas"},
-    {"categoria": "Riesgo social", "descriptor": "Agrupaciones delincuenciales no organizadas"},
-    {"categoria": "Delito", "descriptor": "Alteración de datos y sabotaje informático"},
-    {"categoria": "Otros factores", "descriptor": "Ambiente laboral inadecuado"},
-    {"categoria": "Delito", "descriptor": "Amenazas"},
-    {"categoria": "Riesgo social", "descriptor": "Analfabetismo"},
-    {"categoria": "Riesgo social", "descriptor": "Bajos salarios"},
-    {"categoria": "Riesgo social", "descriptor": "Barras de fútbol"},
-    {"categoria": "Riesgo social", "descriptor": "Búnker (eje de expendio de drogas)"},
-    {"categoria": "Delito", "descriptor": "Calumnia"},
-    {"categoria": "Delito", "descriptor": "Caza ilegal"},
-    {"categoria": "Delito", "descriptor": "Conducción temeraria"},
-    {"categoria": "Riesgo social", "descriptor": "Consumo de alcohol en vía pública"},
-    {"categoria": "Riesgo social", "descriptor": "Consumo de drogas"},
-    {"categoria": "Riesgo social", "descriptor": "Contaminación sónica"},
-    {"categoria": "Delito", "descriptor": "Contrabando"},
-    {"categoria": "Delito", "descriptor": "Corrupción"},
-    {"categoria": "Delito", "descriptor": "Corrupción policial"},
-    {"categoria": "Delito", "descriptor": "Cultivo de droga (marihuana)"},
-    {"categoria": "Delito", "descriptor": "Daño ambiental"},
-    {"categoria": "Delito", "descriptor": "Daños/vandalismo"},
-    {"categoria": "Riesgo social", "descriptor": "Deficiencia en la infraestructura vial"},
-    {"categoria": "Otros factores", "descriptor": "Deficiencia en la línea 9-1-1"},
-    {"categoria": "Riesgo social", "descriptor": "Deficiencias en el alumbrado público"},
-    {"categoria": "Delito", "descriptor": "Delincuencia organizada"},
-    {"categoria": "Delito", "descriptor": "Delitos contra el ámbito de intimidad (violación de secretos, correspondencia y comunicaciones electrónicas)"},
-    {"categoria": "Delito", "descriptor": "Delitos sexuales"},
-    {"categoria": "Riesgo social", "descriptor": "Desaparición de personas"},
-    {"categoria": "Riesgo social", "descriptor": "Desarticulación interinstitucional"},
-    {"categoria": "Riesgo social", "descriptor": "Desempleo"},
-    {"categoria": "Riesgo social", "descriptor": "Desvinculación estudiantil"},
-    {"categoria": "Delito", "descriptor": "Desobediencia"},
-    {"categoria": "Delito", "descriptor": "Desórdenes en vía pública"},
-    {"categoria": "Delito", "descriptor": "Disturbios (riñas)"},
-    {"categoria": "Riesgo social", "descriptor": "Enfrentamientos estudiantiles"},
-    {"categoria": "Delito", "descriptor": "Estafa o defraudación"},
-    {"categoria": "Delito", "descriptor": "Estupro (delitos sexuales contra menor de edad)"},
-    {"categoria": "Delito", "descriptor": "Evasión y quebrantamiento de pena"},
-    {"categoria": "Delito", "descriptor": "Explosivos"},
-    {"categoria": "Delito", "descriptor": "Extorsión"},
-    {"categoria": "Delito", "descriptor": "Fabricación, producción o reproducción de pornografía"},
-    {"categoria": "Riesgo social", "descriptor": "Facilismo económico"},
-    {"categoria": "Delito", "descriptor": "Falsificación de moneda y otros valores"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de cámaras de seguridad"},
-    {"categoria": "Otros factores", "descriptor": "Falta de capacitación policial"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de control a patentes"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de control fronterizo"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de corresponsabilidad en seguridad"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de cultura vial"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de cultura y compromiso ciudadano"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de educación familiar"},
-    {"categoria": "Otros factores", "descriptor": "Falta de incentivos"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de inversión social"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de legislación de extinción de dominio"},
-    {"categoria": "Otros factores", "descriptor": "Falta de personal administrativo"},
-    {"categoria": "Otros factores", "descriptor": "Falta de personal policial"},
-    {"categoria": "Otros factores", "descriptor": "Falta de policías de tránsito"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de políticas públicas en seguridad"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de presencia policial"},
-    {"categoria": "Riesgo social", "descriptor": "Falta de salubridad pública"},
-    {"categoria": "Riesgo social", "descriptor": "Familias disfuncionales"},
-    {"categoria": "Delito", "descriptor": "Fraude informático"},
-    {"categoria": "Delito", "descriptor": "Grooming"},
-    {"categoria": "Riesgo social", "descriptor": "Hacinamiento carcelario"},
-    {"categoria": "Riesgo social", "descriptor": "Hacinamiento policial"},
-    {"categoria": "Delito", "descriptor": "Homicidio"},
-    {"categoria": "Riesgo social", "descriptor": "Hospedajes ilegales (cuarterías)"},
-    {"categoria": "Delito", "descriptor": "Hurto"},
-    {"categoria": "Otros factores", "descriptor": "Inadecuado uso del recurso policial"},
-    {"categoria": "Riesgo social", "descriptor": "Incumplimiento al plan regulador de la municipalidad"},
-    {"categoria": "Delito", "descriptor": "Incumplimiento del deber alimentario"},
-    {"categoria": "Riesgo social", "descriptor": "Indiferencia social"},
-    {"categoria": "Otros factores", "descriptor": "Inefectividad en el servicio de policía"},
-    {"categoria": "Riesgo social", "descriptor": "Ineficiencia en la administración de justicia"},
-    {"categoria": "Otros factores", "descriptor": "Infraestructura inadecuada"},
-    {"categoria": "Riesgo social", "descriptor": "Intolerancia social"},
-    {"categoria": "Otros factores", "descriptor": "Irrespeto a la jefatura"},
-    {"categoria": "Otros factores", "descriptor": "Irrespeto al subalterno"},
-    {"categoria": "Otros factores", "descriptor": "Jornadas laborales extensas"},
-    {"categoria": "Delito", "descriptor": "Lavado de activos"},
-    {"categoria": "Delito", "descriptor": "Lesiones"},
-    {"categoria": "Delito", "descriptor": "Ley de armas y explosivos N° 7530"},
-    {"categoria": "Riesgo social", "descriptor": "Ley de control de tabaco (Ley 9028)"},
-    {"categoria": "Riesgo social", "descriptor": "Lotes baldíos"},
-    {"categoria": "Delito", "descriptor": "Maltrato animal"},
-    {"categoria": "Delito", "descriptor": "Narcotráfico"},
-    {"categoria": "Riesgo social", "descriptor": "Necesidades básicas insatisfechas"},
-    {"categoria": "Riesgo social", "descriptor": "Percepción de inseguridad"},
-    {"categoria": "Riesgo social", "descriptor": "Pérdida de espacios públicos"},
-    {"categoria": "Riesgo social", "descriptor": "Personas con exceso de tiempo de ocio"},
-    {"categoria": "Riesgo social", "descriptor": "Personas en estado migratorio irregular"},
-    {"categoria": "Riesgo social", "descriptor": "Personas en situación de calle"},
-    {"categoria": "Delito", "descriptor": "Menores en vulnerabilidad"},
-    {"categoria": "Delito", "descriptor": "Pesca ilegal"},
-    {"categoria": "Delito", "descriptor": "Portación ilegal de armas"},
-    {"categoria": "Riesgo social", "descriptor": "Presencia multicultural"},
-    {"categoria": "Otros factores", "descriptor": "Presión por resultados operativos"},
-    {"categoria": "Delito", "descriptor": "Privación de libertad sin ánimo de lucro"},
-    {"categoria": "Riesgo social", "descriptor": "Problemas vecinales"},
-    {"categoria": "Delito", "descriptor": "Receptación"},
-    {"categoria": "Delito", "descriptor": "Relaciones impropias"},
-    {"categoria": "Delito", "descriptor": "Resistencia (irrespeto a la autoridad)"},
-    {"categoria": "Delito", "descriptor": "Robo a comercio (intimidación)"},
-    {"categoria": "Delito", "descriptor": "Robo a comercio (tacha)"},
-    {"categoria": "Delito", "descriptor": "Robo a edificación (tacha)"},
-    {"categoria": "Delito", "descriptor": "Robo a personas"},
-    {"categoria": "Delito", "descriptor": "Robo a transporte comercial"},
-    {"categoria": "Delito", "descriptor": "Robo a vehículos (tacha)"},
-    {"categoria": "Delito", "descriptor": "Robo a vivienda (intimidación)"},
-    {"categoria": "Delito", "descriptor": "Robo a vivienda (tacha)"},
-    {"categoria": "Delito", "descriptor": "Robo de bicicleta"},
-    {"categoria": "Delito", "descriptor": "Robo de cultivos"},
-    {"categoria": "Delito", "descriptor": "Robo de motocicletas/vehículos (bajonazo)"},
-    {"categoria": "Delito", "descriptor": "Robo de vehículos"},
-    {"categoria": "Delito", "descriptor": "Secuestro"},
-    {"categoria": "Delito", "descriptor": "Simulación de delito"},
-    {"categoria": "Riesgo social", "descriptor": "Sistema jurídico desactualizado"},
-    {"categoria": "Riesgo social", "descriptor": "Suicidio"},
-    {"categoria": "Delito", "descriptor": "Sustracción de una persona menor de edad o incapaz"},
-    {"categoria": "Delito", "descriptor": "Tala ilegal"},
-    {"categoria": "Riesgo social", "descriptor": "Tendencia social hacia el delito (pautas de crianza violenta)"},
-    {"categoria": "Riesgo social", "descriptor": "Tenencia de droga"},
-    {"categoria": "Delito", "descriptor": "Tentativa de homicidio"},
-    {"categoria": "Delito", "descriptor": "Terrorismo"},
-    {"categoria": "Riesgo social", "descriptor": "Trabajo informal"},
-    {"categoria": "Delito", "descriptor": "Tráfico de armas"},
-    {"categoria": "Delito", "descriptor": "Tráfico de influencias"},
-    {"categoria": "Riesgo social", "descriptor": "Transporte informal (Uber, porteadores, piratas)"},
-    {"categoria": "Delito", "descriptor": "Trata de personas"},
-    {"categoria": "Delito", "descriptor": "Turbación de actos religiosos y profanaciones"},
-    {"categoria": "Delito", "descriptor": "Uso ilegal de uniformes, insignias o dispositivos policiales"},
-    {"categoria": "Delito", "descriptor": "Usurpación de terrenos (precarios)"},
-    {"categoria": "Delito", "descriptor": "Venta de drogas"},
-    {"categoria": "Riesgo social", "descriptor": "Ventas informales (ambulantes)"},
-    {"categoria": "Riesgo social", "descriptor": "Vigilancia informal"},
-    {"categoria": "Delito", "descriptor": "Violación de domicilio"},
-    {"categoria": "Delito", "descriptor": "Violación de la custodia de las cosas"},
-    {"categoria": "Delito", "descriptor": "Violación de sellos"},
-    {"categoria": "Delito", "descriptor": "Violencia de género"},
-    {"categoria": "Delito", "descriptor": "Violencia intrafamiliar"},
-    {"categoria": "Riesgo social", "descriptor": "Xenofobia"},
-    {"categoria": "Riesgo social", "descriptor": "Zonas de prostitución"},
-    {"categoria": "Riesgo social", "descriptor": "Zonas vulnerables"},
-    {"categoria": "Delito", "descriptor": "Robo a transporte público con intimidación"},
-    {"categoria": "Delito", "descriptor": "Robo de cable"},
-    {"categoria": "Delito", "descriptor": "Explotación sexual infantil"},
-    {"categoria": "Delito", "descriptor": "Explotación laboral infantil"},
-    {"categoria": "Delito", "descriptor": "Tráfico ilegal de personas"},
-    {"categoria": "Riesgo social", "descriptor": "Bares clandestinos"},
-    {"categoria": "Delito", "descriptor": "Robo de combustible"},
-    {"categoria": "Delito", "descriptor": "Femicidio"},
-    {"categoria": "Delito", "descriptor": "Delitos contra la vida (homicidios, heridos)"},
-    {"categoria": "Delito", "descriptor": "Venta y consumo de drogas en vía pública"},
-    {"categoria": "Delito", "descriptor": "Asalto (a personas, comercio, vivienda, transporte público)"},
-    {"categoria": "Delito", "descriptor": "Robo de ganado y agrícola"},
-    {"categoria": "Delito", "descriptor": "Robo de equipo agrícola"},
-]
-# ============================================================================
-# 2) UTILIDADES BASE
-# ============================================================================
-ORANGE = "#FF8C00"
-SKY    = "#87CEEB"
+# =========================
+# Config
+# =========================
+st.set_page_config(page_title="Reporte Regional - Encuestas (PDF)", layout="wide")
 
-def calcular_pareto(df_in: pd.DataFrame) -> pd.DataFrame:
-    df = df_in.copy()
-    df["frecuencia"] = pd.to_numeric(df["frecuencia"], errors="coerce").fillna(0).astype(int)
-    df = df[df["frecuencia"] > 0]
-    if df.empty:
-        return df.assign(porcentaje=0.0, acumulado=0, pct_acum=0.0,
-                         segmento_real="20%", segmento="80%")
-    df = df.sort_values("frecuencia", ascending=False)
-    total = int(df["frecuencia"].sum())
-    df["porcentaje"] = (df["frecuencia"] / total * 100).round(2)
-    df["acumulado"]  = df["frecuencia"].cumsum()
-    df["pct_acum"]   = (df["acumulado"] / total * 100).round(2)
-    df["segmento_real"] = np.where(df["pct_acum"] <= 80.00, "80%", "20%")
-    df["segmento"] = "80%"
-    return df.reset_index(drop=True)
+SEM_GREEN_MIN = 80  # >= 80% verde
+SEM_ORANGE_MIN = 40 # 40-79% naranja
+# < 40% rojo
 
-def dibujar_pareto(df_par: pd.DataFrame, titulo: str):
-    if df_par.empty:
-        st.info("Ingresa frecuencias (>0) para ver el gráfico.")
-        return
-    x        = np.arange(len(df_par))
-    freqs    = df_par["frecuencia"].to_numpy()
-    pct_acum = df_par["pct_acum"].to_numpy()
-    colors   = [ORANGE if seg == "80%" else SKY for seg in df_par["segmento_real"]]
-    fig, ax1 = plt.subplots(figsize=(14, 5))
-    ax1.bar(x, freqs, color=colors)
-    ax1.set_ylabel("Frecuencia")
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(df_par["descriptor"].tolist(), rotation=75, ha="right")
-    ax1.set_title(titulo if titulo.strip() else "Pareto — Frecuencia y % acumulado")
-    ax2 = ax1.twinx()
-    ax2.plot(x, pct_acum, marker="o")
-    ax2.set_ylabel("% acumulado")
-    ax2.set_ylim(0, 110)
-    if (df_par["segmento_real"] == "80%").any():
-        cut_idx = np.where(df_par["segmento_real"].to_numpy() == "80%")[0].max()
-        ax1.axvline(cut_idx, linestyle=":", color="k")
-    ax2.axhline(80, linestyle="--")
-    st.pyplot(fig)
+TIPOS_VALIDOS = ["Comunidad", "Comercio", "Policial"]
 
-def exportar_excel_con_grafico(df_par: pd.DataFrame, titulo: str) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        hoja = "Pareto"
-        df_x = df_par.copy()
-        df_x["porcentaje"] = (df_x["porcentaje"] / 100.0).round(4)
-        df_x["pct_acum"]   = (df_x["pct_acum"] / 100.0).round(4)
-        df_x = df_x[["categoria", "descriptor", "frecuencia",
-                     "porcentaje", "pct_acum", "acumulado", "segmento"]]
-        df_x.to_excel(writer, sheet_name=hoja, index=False, startrow=0, startcol=0)
-        wb = writer.book; ws = writer.sheets[hoja]
-        pct_fmt = wb.add_format({"num_format": "0.00%"})
-        total_fmt = wb.add_format({"bold": True})
-        ws.set_column("A:A", 18); ws.set_column("B:B", 55); ws.set_column("C:C", 12)
-        ws.set_column("D:D", 12, pct_fmt); ws.set_column("E:E", 18, pct_fmt)
-        ws.set_column("F:F", 12); ws.set_column("G:G", 10)
-        n = len(df_x)
-        cats = f"=Pareto!$B$2:$B${n+1}"; vals = f"=Pareto!$C$2:$C${n+1}"; pcts = f"=Pareto!$E$2:$E${n+1}"
-        total = int(df_par["frecuencia"].sum())
-        ws.write(n + 2, 1, "TOTAL:", total_fmt); ws.write(n + 2, 2, total, total_fmt)
+
+# =========================
+# Helpers - Parsing
+# =========================
+@dataclass
+class ParsedHeader:
+    delegacion: str
+    fecha: str
+    hora: str
+
+
+def _extract_text_from_pdf(file_bytes: bytes) -> str:
+    reader = PdfReader(io.BytesIO(file_bytes))
+    text_all = []
+    for page in reader.pages:
+        t = page.extract_text() or ""
+        text_all.append(t)
+    return "\n".join(text_all)
+
+
+def _parse_header(text: str) -> ParsedHeader:
+    # Delegación: San Carlos Oeste
+    # Hora del reporte: 13:35
+    # Fecha: miércoles, 4 de marzo de 2026
+    deleg = ""
+    hora = ""
+    fecha = ""
+
+    m = re.search(r"Delegaci[oó]n:\s*(.+)", text, re.IGNORECASE)
+    if m:
+        deleg = m.group(1).strip()
+
+    m = re.search(r"Hora del reporte:\s*([0-9]{1,2}:[0-9]{2})", text, re.IGNORECASE)
+    if m:
+        hora = m.group(1).strip()
+
+    m = re.search(r"Fecha:\s*(.+)", text, re.IGNORECASE)
+    if m:
+        fecha = m.group(1).strip()
+
+    return ParsedHeader(delegacion=deleg, fecha=fecha, hora=hora)
+
+
+def _section_lines(text: str, section_name: str) -> List[str]:
+    """
+    Extract lines between section_name and next section.
+    Sections in your PDFs appear as:
+    Comunidad
+    ...
+    Comercio
+    ...
+    Policial
+    ...
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    idxs = {name: None for name in TIPOS_VALIDOS}
+    for i, ln in enumerate(lines):
+        for name in TIPOS_VALIDOS:
+            if ln.lower() == name.lower():
+                idxs[name] = i
+
+    start = idxs.get(section_name)
+    if start is None:
+        return []
+
+    # find next section start after 'start'
+    next_starts = []
+    for name in TIPOS_VALIDOS:
+        j = idxs.get(name)
+        if j is not None and j > start:
+            next_starts.append(j)
+    end = min(next_starts) if next_starts else len(lines)
+
+    return lines[start + 1: end]
+
+
+def _parse_table_lines(section: str, header: ParsedHeader, section_lines: List[str]) -> List[Dict]:
+    """
+    Parses lines like:
+    Comunidad La Fortuna 155 6 4% 149
+    Comercio San Carlos Oeste 231 3 1% 228
+    Policial San Carlos Oeste 94 42 45% 52
+    """
+    rows = []
+    if not section_lines:
+        return rows
+
+    # If section says "No hay registros..."
+    if any("no hay registros" in ln.lower() for ln in section_lines):
+        return rows
+
+    # remove header line if present
+    # "Tipo Distrito Meta Contabilidad % Avance Pendiente"
+    cleaned = []
+    for ln in section_lines:
+        if re.search(r"Tipo\s+Distrito\s+Meta\s+Contabilidad", ln, re.IGNORECASE):
+            continue
+        cleaned.append(ln)
+
+    for ln in cleaned:
+        # Only parse lines that begin with the section word or a known tipo
+        # In your PDFs: line starts with the same as section (Comunidad/Comercio/Policial)
+        toks = ln.split()
+        if len(toks) < 6:
+            continue
+
+        tipo = toks[0].strip()
+        if tipo.lower() not in [t.lower() for t in TIPOS_VALIDOS]:
+            continue
+
+        # last tokens: Meta Contabilidad %Avance Pendiente
+        # Example: 155 6 4% 149
         try:
-            idxs = np.where(df_par["segmento_real"].to_numpy() == "80%")[0]
-            if len(idxs) > 0:
-                last = int(idxs.max())
-                orange_bg = wb.add_format({"bg_color": ORANGE, "font_color": "#000000"})
-                ws.conditional_format(1, 0, 1 + last, 6, {"type": "no_blanks", "format": orange_bg})
-        except Exception:
-            pass
-        chart = wb.add_chart({"type": "column"})
-        points = [{"fill": {"color": (ORANGE if s == "80%" else SKY)}} for s in df_par["segmento_real"]]
-        chart.add_series({"name": "Frecuencia", "categories": cats, "values": vals, "points": points})
-        line = wb.add_chart({"type": "line"})
-        line.add_series({"name": "% acumulado", "categories": cats, "values": pcts,
-                         "y2_axis": True, "marker": {"type": "circle"}})
-        chart.combine(line)
-        chart.set_y_axis({"name": "Frecuencia"})
-        chart.set_y2_axis({"name": "Porcentaje acumulado",
-                           "min": 0, "max": 1.10, "major_unit": 0.10, "num_format": "0%"})
-        chart.set_title({"name": titulo if titulo.strip() else "PARETO – Frecuencia y % acumulado"})
-        chart.set_legend({"position": "bottom"}); chart.set_size({"width": 1180, "height": 420})
-        ws.insert_chart("I2", chart)
-    return output.getvalue()
-
-# ============================================================================
-# 3) UTILIDADES DE PORTAFOLIO
-# ============================================================================
-def _map_descriptor_a_categoria() -> Dict[str, str]:
-    df = pd.DataFrame(CATALOGO); return dict(zip(df["descriptor"], df["categoria"]))
-DESC2CAT = _map_descriptor_a_categoria()
-
-def normalizar_freq_map(freq_map: Dict[str, int]) -> Dict[str, int]:
-    out = {}
-    for d, v in (freq_map or {}).items():
-        try:
-            vv = int(pd.to_numeric(v, errors="coerce"))
-            if vv > 0: out[d] = vv
+            pendiente = int(toks[-1])
+            avance_str = toks[-2]
+            contabilidad = int(toks[-3])
+            meta = int(toks[-4])
+            distrito = " ".join(toks[1:-4]).strip()
         except Exception:
             continue
-    return out
 
-def df_desde_freq_map(freq_map: Dict[str, int]) -> pd.DataFrame:
-    items = []
-    for d, f in normalizar_freq_map(freq_map).items():
-        items.append({"descriptor": d, "categoria": DESC2CAT.get(d, "—"), "frecuencia": int(f)})
-    df = pd.DataFrame(items)
-    if df.empty: return pd.DataFrame(columns=["descriptor", "categoria", "frecuencia"])
-    return df
-
-def combinar_maps(maps: List[Dict[str, int]]) -> Dict[str, int]:
-    total = {}
-    for m in maps:
-        for d, f in normalizar_freq_map(m).items():
-            total[d] = total.get(d, 0) + int(f)
-    return total
-
-def info_pareto(freq_map: Dict[str, int]) -> Dict[str, int]:
-    d = normalizar_freq_map(freq_map); return {"descriptores": len(d), "total": int(sum(d.values()))}
-
-# ============================================================================
-# 4) GOOGLE SHEETS HELPERS
-# ============================================================================
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
-
-def _gc():
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=SCOPES)
-    return gspread.authorize(creds)
-
-def _open_sheet():
-    gc = _gc(); return gc.open_by_url(SPREADSHEET_URL)
-
-def _ensure_ws(sh, title: str, header: List[str]):
-    try:
-        ws = sh.worksheet(title)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=1000, cols=10)
-        ws.append_row(header); return ws
-    values = ws.get_all_values()
-    if not values:
-        ws.append_row(header)
-    else:
-        first = values[0]
-        if [c.strip().lower() for c in first] != [c.strip().lower() for c in header]:
-            ws.clear(); ws.append_row(header)
-    return ws
-
-def sheets_cargar_portafolio() -> Dict[str, Dict[str, int]]:
-    try:
-        sh = _open_sheet(); ws = _ensure_ws(sh, WS_PARETOS, ["nombre","descriptor","frecuencia"])
-        rows = ws.get_all_records()
-        port: Dict[str, Dict[str, int]] = {}
-        for r in rows:
-            nom = str(r.get("nombre","")).strip()
-            desc = str(r.get("descriptor","")).strip()
-            freq = int(pd.to_numeric(r.get("frecuencia",0), errors="coerce") or 0)
-            if not nom or not desc or freq <= 0: continue
-            bucket = port.setdefault(nom, {}); bucket[desc] = bucket.get(desc, 0) + freq
-        return port
-    except Exception:
-        return {}
-
-def sheets_guardar_pareto(nombre: str, freq_map: Dict[str, int], sobrescribir: bool = True):
-    sh = _open_sheet()
-    ws = _ensure_ws(sh, WS_PARETOS, ["nombre","descriptor","frecuencia"])
-    if sobrescribir:
-        vals = ws.get_all_values()
-        header = vals[0] if vals else ["nombre","descriptor","frecuencia"]
-        others = [r for r in vals[1:] if (len(r)>0 and r[0].strip().lower()!=nombre.strip().lower())]
-        ws.clear(); ws.update("A1", [header])
-        if others: ws.append_rows(others, value_input_option="RAW")
-    rows_new = [[nombre, d, int(f)] for d, f in normalizar_freq_map(freq_map).items()]
-    if rows_new: ws.append_rows(rows_new, value_input_option="RAW")
-# ============================================================================
-# 5) ESTADO DE SESIÓN (con flag de reseteo)
-# ============================================================================
-st.session_state.setdefault("freq_map", {})
-st.session_state.setdefault("portafolio", {})
-st.session_state.setdefault("msel", [])
-st.session_state.setdefault("reset_after_save", False)
-
-# Cargar portafolio desde Sheets una vez si está vacío
-if not st.session_state["portafolio"]:
-    loaded = sheets_cargar_portafolio()
-    if loaded: st.session_state["portafolio"].update(loaded)
-
-# ---- APLICAR RESET ANTES DE DIBUJAR WIDGETS ----
-if st.session_state.get("reset_after_save", False):
-    st.session_state["freq_map"] = {}
-    st.session_state["msel"] = []
-    st.session_state.pop("editor_freq", None)
-    st.session_state["reset_after_save"] = False
-
-# ============================================================================
-# 6) UI PRINCIPAL
-# ============================================================================
-st.title("Pareto de Descriptores")
-
-c_t1, c_t2, c_t3 = st.columns([2,1,1])
-with c_t1:
-    titulo = st.text_input("Título del Pareto (opcional)", value="Pareto Comunidad")
-with c_t2:
-    nombre_para_guardar = st.text_input("Nombre para guardar este Pareto", value="Comunidad")
-with c_t3:
-    if st.button("🔄 Recargar portafolio desde Sheets"):
-        st.session_state["portafolio"] = sheets_cargar_portafolio()
-        st.success("Portafolio recargado desde Google Sheets.")
-        st.rerun()
-
-cat_df = pd.DataFrame(CATALOGO).sort_values(["categoria","descriptor"]).reset_index(drop=True)
-opciones = cat_df["descriptor"].tolist()
-seleccion = st.multiselect("1) Escoge uno o varios descriptores", options=opciones,
-                           default=st.session_state["msel"], key="msel")
-
-st.subheader("2) Asigna la frecuencia")
-if seleccion:
-    base = cat_df[cat_df["descriptor"].isin(seleccion)].copy()
-    base["frecuencia"] = [st.session_state["freq_map"].get(d, 0) for d in base["descriptor"]]
-
-    edit = st.data_editor(
-        base, key="editor_freq", num_rows="fixed", use_container_width=True,
-        column_config={
-            "descriptor": st.column_config.TextColumn("DESCRIPTOR", width="large"),
-            "categoria": st.column_config.TextColumn("CATEGORÍA", width="small"),
-            "frecuencia": st.column_config.NumberColumn("Frecuencia", min_value=0, step=1),
-        },
-    )
-    for _, row in edit.iterrows():
-        st.session_state["freq_map"][row["descriptor"]] = int(row["frecuencia"])
-
-    df_in = edit[["descriptor","categoria"]].copy()
-    df_in["frecuencia"] = df_in["descriptor"].map(st.session_state["freq_map"]).fillna(0).astype(int)
-
-    st.subheader("3) Pareto (en edición)")
-    tabla = calcular_pareto(df_in)
-
-    mostrar = tabla.copy()[["categoria","descriptor","frecuencia","porcentaje","pct_acum","acumulado","segmento"]]
-    mostrar = mostrar.rename(columns={"pct_acum": "porcentaje acumulado"})
-    mostrar["porcentaje"] = mostrar["porcentaje"].map(lambda x: f"{x:.2f}%")
-    mostrar["porcentaje acumulado"] = mostrar["porcentaje acumulado"].map(lambda x: f"{x:.2f}%")
-
-    c1, c2 = st.columns([1,1], gap="large")
-    with c1:
-        st.markdown("**Tabla de Pareto**")
-        if not tabla.empty:
-            st.dataframe(mostrar, use_container_width=True, hide_index=True)
+        # normalize percent
+        avance_pct = None
+        m = re.match(r"^([0-9]+)\s*%$", avance_str.strip())
+        if m:
+            avance_pct = float(m.group(1))
         else:
-            st.info("Ingresa frecuencias (>0) para ver la tabla.")
-    with c2:
-        st.markdown("**Gráfico de Pareto**"); dibujar_pareto(tabla, titulo)
+            # fallback if "4%" without space
+            m2 = re.search(r"([0-9]+)\s*%$", avance_str.strip())
+            avance_pct = float(m2.group(1)) if m2 else None
 
-    st.subheader("4) Guardar / Descargar")
-    col_g1, col_g2, _ = st.columns([1,1,2])
-    with col_g1:
-        sobrescribir = st.checkbox("Sobrescribir si existe", value=True)
-        if st.button("💾 Guardar este Pareto"):
-            nombre = nombre_para_guardar.strip()
-            if not nombre:
-                st.warning("Indica un nombre para guardar el Pareto.")
-            else:
-                st.session_state["portafolio"][nombre] = normalizar_freq_map(st.session_state["freq_map"])
-                try:
-                    sheets_guardar_pareto(nombre, st.session_state["freq_map"], sobrescribir=sobrescribir)
-                    st.success(f"Pareto '{nombre}' guardado en Google Sheets y en la sesión.")
-                except Exception as e:
-                    st.warning(f"Se guardó en la sesión, pero hubo un problema con Sheets: {e}")
-                # Activar flag de reseteo y re-ejecutar
-                st.session_state["reset_after_save"] = True
-                st.rerun()
-    with col_g2:
-        if not tabla.empty:
-            st.download_button(
-                "⬇️ Excel del Pareto (edición)",
-                data=exportar_excel_con_grafico(tabla, titulo),
-                file_name=f"pareto_{(nombre_para_guardar or 'edicion').lower().replace(' ','_')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-else:
-    st.info("Selecciona al menos un descriptor para continuar. Tus frecuencias se conservarán si luego agregas más descriptores.")
-# ============================================================================
-# 7) PORTAFOLIO, UNIFICADO Y DESCARGAS
-# ============================================================================
-st.markdown("---")
-st.header("📁 Portafolio de Paretos (guardados)")
+        rows.append({
+            "Delegación": header.delegacion,
+            "Fecha": header.fecha,
+            "Hora": header.hora,
+            "Tipo": tipo,
+            "Distrito": distrito,
+            "Meta": meta,
+            "Contabilidad": contabilidad,
+            "% Avance": avance_pct if avance_pct is not None else 0.0,
+            "Pendiente": pendiente,
+        })
 
-if not st.session_state["portafolio"]:
-    st.info("Aún no hay paretos guardados. Guarda el primero desde la sección anterior.")
-else:
-    st.subheader("Selecciona paretos para Unificar")
-    nombres = sorted(st.session_state["portafolio"].keys())
-    sel_unif = st.multiselect("Elige 2 o más paretos para combinar (o usa el botón de 'Unificar todos')",
-                              options=nombres, default=[], key="sel_unif")
-
-    c_unif1, c_unif2 = st.columns([1,1])
-    with c_unif1: unificar_todos = st.button("🔗 Unificar TODOS los paretos guardados")
-    with c_unif2: st.caption(f"Total de paretos guardados: **{len(nombres)}**")
-
-    st.markdown("### Paretos guardados")
-    for nom in nombres:
-        freq_map = st.session_state["portafolio"][nom]
-        meta = info_pareto(freq_map)
-        with st.expander(f"🔹 {nom} — {meta['descriptores']} descriptores | Total: {meta['total']}"):
-            df_base = df_desde_freq_map(freq_map)
-            tabla_g = calcular_pareto(df_base)
-
-            mostrar_g = tabla_g.copy()[["categoria","descriptor","frecuencia","porcentaje","pct_acum","acumulado","segmento"]]
-            mostrar_g = mostrar_g.rename(columns={"pct_acum":"porcentaje acumulado"})
-            if not mostrar_g.empty:
-                mostrar_g["porcentaje"] = mostrar_g["porcentaje"].map(lambda x: f"{x:.2f}%")
-                mostrar_g["porcentaje acumulado"] = mostrar_g["porcentaje acumulado"].map(lambda x: f"{x:.2f}%")
+    return rows
 
 
-            cc1, cc2, cc3 = st.columns([1,1,1])
-            with cc1:
-                if not mostrar_g.empty:
-                    st.dataframe(mostrar_g, use_container_width=True, hide_index=True)
-                else:
-                    st.info("Este pareto no tiene frecuencias > 0.")
-            with cc2:
-                st.markdown("**Gráfico**"); dibujar_pareto(tabla_g, f"Pareto — {nom}")
-            with cc3:
-                st.markdown("**Acciones**")
-                if not tabla_g.empty:
-                    st.download_button(
-                        "⬇️ Excel de este Pareto",
-                        data=exportar_excel_con_grafico(tabla_g, f"Pareto — {nom}"),
-                        file_name=f"pareto_{nom.lower().replace(' ','_')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"dl_{nom}",
-                    )
-                if st.button("📥 Cargar este Pareto al editor", key=f"load_{nom}"):
-                    st.session_state["freq_map"] = dict(freq_map)
-                    st.session_state["msel"] = list(freq_map.keys())
-                    st.success(f"Pareto '{nom}' cargado al editor (arriba). Desplázate para editar.")
-                if st.button("🗑️ Eliminar de la sesión", key=f"del_{nom}"):
-                    try:
-                        del st.session_state["portafolio"][nom]
-                        st.warning(f"Pareto '{nom}' eliminado del portafolio de la sesión.")
-                        st.rerun()
-                    except Exception:
-                        st.error("No se pudo eliminar. Intenta de nuevo.")
+def parse_pdf_report(file_name: str, file_bytes: bytes) -> Tuple[ParsedHeader, pd.DataFrame]:
+    text = _extract_text_from_pdf(file_bytes)
+    header = _parse_header(text)
 
-    st.markdown("---"); st.header("🔗 Pareto Unificado (por filtro o general)")
-    maps_a_unir = []; titulo_unif = ""
-    if unificar_todos and nombres:
-        maps_a_unir = [st.session_state["portafolio"][n] for n in nombres]
-        titulo_unif = "Pareto General (todos los paretos)"
-    elif len(st.session_state.get("sel_unif", [])) >= 2:
-        maps_a_unir = [st.session_state["portafolio"][n] for n in st.session_state["sel_unif"]]
-        titulo_unif = f"Unificado: {', '.join(st.session_state['sel_unif'])}"
-    if maps_a_unir:
-        combinado = combinar_maps(maps_a_unir)
-        df_unif = df_desde_freq_map(combinado)
-        tabla_unif = calcular_pareto(df_unif)
-        mostrar_u = tabla_unif.copy()[["categoria","descriptor","frecuencia","porcentaje","pct_acum","acumulado","segmento"]]
-        mostrar_u = mostrar_u.rename(columns={"pct_acum":"porcentaje acumulado"})
-        if not mostrar_u.empty:
-            mostrar_u["porcentaje"] = mostrar_u["porcentaje"].map(lambda x: f"{x:.2f}%")
-            mostrar_u["porcentaje acumulado"] = mostrar_u["porcentaje acumulado"].map(lambda x: f"{x:.2f}%")
-        cu1, cu2 = st.columns([1,1], gap="large")
-        with cu1:
-            st.markdown("**Tabla Unificada**")
-            if not mostrar_u.empty:
-                st.dataframe(mostrar_u, use_container_width=True, hide_index=True)
-            else:
-                st.info("Sin datos > 0 en la combinación seleccionada.")
-        with cu2:
-            st.markdown("**Gráfico Unificado**"); dibujar_pareto(tabla_unif, titulo_unif or "Pareto Unificado")
-        if not tabla_unif.empty:
-            st.download_button(
-                "⬇️ Descargar Excel del Pareto Unificado",
-                data=exportar_excel_con_grafico(tabla_unif, titulo_unif or "Pareto Unificado"),
-                file_name="pareto_unificado.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_unificado",
-            )
+    all_rows = []
+    for sec in TIPOS_VALIDOS:
+        lines = _section_lines(text, sec)
+        all_rows.extend(_parse_table_lines(sec, header, lines))
+
+    df = pd.DataFrame(all_rows)
+    if df.empty:
+        # Keep at least header info
+        df = pd.DataFrame(columns=["Delegación", "Fecha", "Hora", "Tipo", "Distrito", "Meta", "Contabilidad", "% Avance", "Pendiente"])
+    df["Archivo"] = file_name
+    return header, df
+
+
+# =========================
+# Helpers - Metrics & Semáforo
+# =========================
+def semaforo_color(avance_pct: float):
+    if avance_pct >= SEM_GREEN_MIN:
+        return colors.HexColor("#1B5E20")  # verde oscuro
+    if avance_pct >= SEM_ORANGE_MIN:
+        return colors.HexColor("#E65100")  # naranja
+    return colors.HexColor("#B71C1C")      # rojo
+
+
+def semaforo_label(avance_pct: float) -> str:
+    if avance_pct >= SEM_GREEN_MIN:
+        return "ALTO"
+    if avance_pct >= SEM_ORANGE_MIN:
+        return "MEDIO"
+    return "BAJO"
+
+
+def agg_region_tipo(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate by Región + Tipo with weighted progress:
+    avance% = (sum(contabilidad)/sum(meta))*100
+    """
+    g = df.groupby(["Región", "Tipo"], dropna=False).agg(
+        Meta=("Meta", "sum"),
+        Contabilidad=("Contabilidad", "sum"),
+        Pendiente=("Pendiente", "sum"),
+    ).reset_index()
+
+    g["% Avance"] = g.apply(lambda r: (r["Contabilidad"] / r["Meta"] * 100.0) if r["Meta"] else 0.0, axis=1)
+    g["Semáforo"] = g["% Avance"].apply(semaforo_label)
+    return g
+
+
+def agg_region_delegacion_tipo(df: pd.DataFrame) -> pd.DataFrame:
+    g = df.groupby(["Región", "Delegación", "Tipo"], dropna=False).agg(
+        Meta=("Meta", "sum"),
+        Contabilidad=("Contabilidad", "sum"),
+        Pendiente=("Pendiente", "sum"),
+    ).reset_index()
+    g["% Avance"] = g.apply(lambda r: (r["Contabilidad"] / r["Meta"] * 100.0) if r["Meta"] else 0.0, axis=1)
+    g["Semáforo"] = g["% Avance"].apply(semaforo_label)
+    return g
+
+
+# =========================
+# PDF Builder (ReportLab)
+# =========================
+def _rl_image_from_pil(pil_img: Image.Image, width_in: float = 1.2) -> RLImage:
+    bio = io.BytesIO()
+    pil_img.save(bio, format="PNG")
+    bio.seek(0)
+    img = RLImage(bio)
+    img.drawWidth = width_in * inch
+    img.drawHeight = (pil_img.height / pil_img.width) * img.drawWidth
+    return img
+
+
+def build_pdf_report(
+    df_detalle: pd.DataFrame,
+    df_regional: pd.DataFrame,
+    df_por_deleg: pd.DataFrame,
+    logo_pil: Optional[Image.Image],
+    titulo: str,
+    subtitulo: str,
+) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="H1", parent=styles["Heading1"], fontSize=16, spaceAfter=10))
+    styles.add(ParagraphStyle(name="H2", parent=styles["Heading2"], fontSize=12, spaceAfter=6))
+    styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontSize=9, leading=11))
+    styles.add(ParagraphStyle(name="Tiny", parent=styles["BodyText"], fontSize=8, leading=10))
+
+    elems = []
+
+    # Header
+    header_tbl = []
+    if logo_pil:
+        header_tbl.append([_rl_image_from_pil(logo_pil, width_in=1.1),
+                           Paragraph(f"<b>{titulo}</b><br/>{subtitulo}", styles["H1"])])
     else:
-        st.info("Selecciona 2+ paretos en el multiselect o usa el botón 'Unificar TODOS'.")
+        header_tbl.append([Paragraph(f"<b>{titulo}</b><br/>{subtitulo}", styles["H1"]), ""])
+
+    t = Table(header_tbl, colWidths=[1.3 * inch, 5.7 * inch])
+    t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LINEBELOW", (0, 0), (-1, -1), 1, colors.black),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    elems.append(t)
+    elems.append(Spacer(1, 10))
+
+    # Resumen regional
+    elems.append(Paragraph("Resumen regional (Meta / Contabilidad / Pendiente / % Avance)", styles["H2"]))
+
+    reg = df_regional.copy()
+    reg = reg.sort_values(["Región", "Tipo"])
+
+    data = [["Región", "Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Semáforo"]]
+    for _, r in reg.iterrows():
+        data.append([
+            str(r["Región"]),
+            str(r["Tipo"]),
+            f'{int(r["Meta"]):,}'.replace(",", "."),
+            f'{int(r["Contabilidad"]):,}'.replace(",", "."),
+            f'{int(r["Pendiente"]):,}'.replace(",", "."),
+            f'{r["% Avance"]:.1f}%',
+            str(r["Semáforo"]),
+        ])
+
+    tbl = Table(data, repeatRows=1, colWidths=[1.6*inch, 1.0*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.8*inch])
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#263238")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 9),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+    ]
+
+    # semáforo color cell (last column)
+    for i in range(1, len(data)):
+        pct = float(reg.iloc[i-1]["% Avance"])
+        style_cmds.append(("BACKGROUND", (-1, i), (-1, i), semaforo_color(pct)))
+        style_cmds.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
+        style_cmds.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
+
+    tbl.setStyle(TableStyle(style_cmds))
+    elems.append(tbl)
+    elems.append(Spacer(1, 12))
+
+    # Por región: detalle por delegación
+    regiones = [r for r in df_por_deleg["Región"].dropna().unique().tolist()]
+    regiones = sorted(regiones)
+
+    if not regiones:
+        elems.append(Paragraph("<i>No hay regiones asignadas aún. Asigne regiones en la app y vuelva a generar.</i>", styles["Small"]))
+    else:
+        for region in regiones:
+            elems.append(PageBreak())
+            elems.append(Paragraph(f"Región: {region}", styles["H1"]))
+
+            # Sub-resumen región
+            sub = df_regional[df_regional["Región"] == region].sort_values("Tipo")
+            sub_data = [["Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Semáforo"]]
+            for _, r in sub.iterrows():
+                sub_data.append([
+                    str(r["Tipo"]),
+                    f'{int(r["Meta"]):,}'.replace(",", "."),
+                    f'{int(r["Contabilidad"]):,}'.replace(",", "."),
+                    f'{int(r["Pendiente"]):,}'.replace(",", "."),
+                    f'{r["% Avance"]:.1f}%',
+                    str(r["Semáforo"])
+                ])
+
+            sub_tbl = Table(sub_data, repeatRows=1, colWidths=[1.2*inch, 1.0*inch, 1.2*inch, 1.0*inch, 0.9*inch, 0.9*inch])
+            sub_style = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#37474F")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ]
+            for i in range(1, len(sub_data)):
+                pct = float(sub.iloc[i-1]["% Avance"])
+                sub_style.append(("BACKGROUND", (-1, i), (-1, i), semaforo_color(pct)))
+                sub_style.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
+                sub_style.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
+            sub_tbl.setStyle(TableStyle(sub_style))
+            elems.append(sub_tbl)
+            elems.append(Spacer(1, 12))
+
+            # Tabla por delegación y tipo
+            det = df_por_deleg[df_por_deleg["Región"] == region].copy()
+            det = det.sort_values(["Delegación", "Tipo"])
+            det_data = [["Delegación", "Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Semáforo"]]
+            for _, r in det.iterrows():
+                det_data.append([
+                    str(r["Delegación"]),
+                    str(r["Tipo"]),
+                    f'{int(r["Meta"]):,}'.replace(",", "."),
+                    f'{int(r["Contabilidad"]):,}'.replace(",", "."),
+                    f'{int(r["Pendiente"]):,}'.replace(",", "."),
+                    f'{r["% Avance"]:.1f}%',
+                    str(r["Semáforo"])
+                ])
+
+            det_tbl = Table(det_data, repeatRows=1, colWidths=[2.0*inch, 0.9*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.8*inch])
+            det_style = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#263238")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+            for i in range(1, len(det_data)):
+                pct = float(det.iloc[i-1]["% Avance"])
+                det_style.append(("BACKGROUND", (-1, i), (-1, i), semaforo_color(pct)))
+                det_style.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
+                det_style.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
+            det_tbl.setStyle(TableStyle(det_style))
+            elems.append(det_tbl)
+            elems.append(Spacer(1, 12))
+
+            # Nota metodológica
+            elems.append(Paragraph(
+                "Nota: El % de avance se calcula como (Contabilidad total / Meta total) × 100, ponderado por la meta.",
+                styles["Tiny"]
+            ))
+
+    doc.build(elems)
+    pdf_bytes = buf.getvalue()
+    buf.close()
+    return pdf_bytes
 
 
+# =========================
+# UI
+# =========================
+st.title("📄 Reporte Regional – Encuestas (Comunidad / Comercio / Policial)")
 
+with st.sidebar:
+    st.header("Configuración")
+    titulo = st.text_input("Título del informe", value="Informe de Avance Regional – Encuestas")
+    subtitulo = st.text_input("Subtítulo", value="Comunidad / Comercio / Policial")
 
+    st.markdown("---")
+    st.subheader("Logo (PNG/JPG)")
+    logo_file = st.file_uploader("Cargar logo", type=["png", "jpg", "jpeg"], accept_multiple_files=False)
+    logo_img = None
+    if logo_file:
+        try:
+            logo_img = Image.open(logo_file).convert("RGBA")
+            st.image(logo_img, caption="Logo cargado", use_container_width=True)
+        except Exception:
+            st.warning("No pude leer el logo. Intente con PNG/JPG.")
 
+    st.markdown("---")
+    st.subheader("Semáforo de avance")
+    c1, c2 = st.columns(2)
+    with c1:
+        green_min = st.number_input("Verde desde (%)", min_value=0, max_value=100, value=SEM_GREEN_MIN, step=1)
+    with c2:
+        orange_min = st.number_input("Naranja desde (%)", min_value=0, max_value=100, value=SEM_ORANGE_MIN, step=1)
+    # Update globals locally (simple approach)
+    SEM_GREEN_MIN = float(green_min)
+    SEM_ORANGE_MIN = float(orange_min)
 
+st.markdown("### 1) Suba los PDFs de reporte por delegación")
+pdf_files = st.file_uploader(
+    "Puede subir varios PDFs a la vez",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
+if not pdf_files:
+    st.info("Suba los PDFs para empezar. (Formato como los reportes que ya estás generando).")
+    st.stop()
+
+# Parse PDFs
+all_dfs = []
+headers = []
+parse_errors = []
+
+for f in pdf_files:
+    try:
+        b = f.read()
+        header, df = parse_pdf_report(f.name, b)
+        headers.append(header)
+        all_dfs.append(df)
+    except Exception as e:
+        parse_errors.append((f.name, str(e)))
+
+if parse_errors:
+    st.error("Algunos PDFs no se pudieron procesar:")
+    for name, err in parse_errors:
+        st.write(f"- {name}: {err}")
+
+df_all = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+
+# Show parsed
+st.markdown("### 2) Datos detectados (desde los PDFs)")
+if df_all.empty:
+    st.warning("No se detectaron filas de tablas en los PDFs. Revise que el PDF tenga texto (no imagen).")
+    st.stop()
+
+# Build region assignment table
+delegaciones = sorted(df_all["Delegación"].dropna().unique().tolist())
+st.markdown("### 3) Asignación de Región (manual)")
+st.caption("Edite la columna Región para cada delegación. Luego genere el PDF consolidado.")
+
+# create editable mapping
+map_df = pd.DataFrame({"Delegación": delegaciones, "Región": [""] * len(delegaciones)})
+
+# try to keep prior edits in session
+if "region_map" in st.session_state:
+    prev = st.session_state["region_map"]
+    map_df = map_df.merge(prev, on="Delegación", how="left", suffixes=("", "_prev"))
+    map_df["Región"] = map_df["Región_prev"].fillna(map_df["Región"])
+    map_df = map_df[["Delegación", "Región"]]
+
+edited = st.data_editor(
+    map_df,
+    use_container_width=True,
+    num_rows="fixed",
+    column_config={
+        "Delegación": st.column_config.TextColumn(disabled=True),
+        "Región": st.column_config.TextColumn(help="Ej: Región Huetar Norte, Región 2 Alajuela, etc.")
+    }
+)
+
+st.session_state["region_map"] = edited.copy()
+
+# Merge regions into df_all
+df = df_all.merge(edited, on="Delegación", how="left")
+
+# Validate
+missing_region = df["Región"].isna().sum() + (df["Región"].astype(str).str.strip() == "").sum()
+if missing_region > 0:
+    st.warning("Hay delegaciones sin Región asignada. Puede generar igual, pero el informe quedará incompleto por región.")
+
+# Metrics
+st.markdown("### 4) Resumen (en pantalla)")
+
+df_valid = df.copy()
+df_valid["Región"] = df_valid["Región"].fillna("").astype(str).str.strip()
+
+df_reg = agg_region_tipo(df_valid[df_valid["Región"] != ""]) if (df_valid["Región"] != "").any() else pd.DataFrame()
+df_deleg = agg_region_delegacion_tipo(df_valid[df_valid["Región"] != ""]) if (df_valid["Región"] != "").any() else pd.DataFrame()
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.metric("Delegaciones detectadas", len(delegaciones))
+with c2:
+    st.metric("Regiones con datos", df_valid[df_valid["Región"] != ""]["Región"].nunique())
+with c3:
+    st.metric("Filas de detalle", len(df_valid))
+
+st.dataframe(df_valid.sort_values(["Delegación", "Tipo", "Distrito"]), use_container_width=True, height=320)
+
+if not df_reg.empty:
+    st.markdown("#### Resumen regional por tipo")
+    st.dataframe(df_reg.sort_values(["Región", "Tipo"]), use_container_width=True)
+
+# Generate PDF
+st.markdown("### 5) Generar PDF consolidado")
+
+colA, colB = st.columns([1, 2])
+with colA:
+    generar = st.button("🧾 Generar informe PDF", type="primary")
+with colB:
+    st.caption("El PDF incluye: portada simple con logo + resumen regional + páginas por región con detalle por delegación y semáforo.")
+
+if generar:
+    if df_valid[df_valid["Región"] != ""].empty:
+        st.error("Asigne al menos una región (columna Región) para poder consolidar.")
+        st.stop()
+
+    pdf_bytes = build_pdf_report(
+        df_detalle=df_valid[df_valid["Región"] != ""].copy(),
+        df_regional=df_reg.copy(),
+        df_por_deleg=df_deleg.copy(),
+        logo_pil=logo_img,
+        titulo=titulo,
+        subtitulo=subtitulo
+    )
+
+    st.success("PDF generado.")
+    st.download_button(
+        "⬇️ Descargar informe PDF",
+        data=pdf_bytes,
+        file_name="Informe_Avance_Regional_Encuestas.pdf",
+        mime="application/pdf"
+    )
 
