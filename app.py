@@ -47,7 +47,8 @@ REGIONES_CATALOGO = [
 
 # Colores institucionales
 COLOR_VERDE = colors.HexColor("#1B5E20")
-COLOR_NARANJA = colors.HexColor("#E65100")
+# ✅ CAMBIO 1: lo que era naranja ahora será amarillo
+COLOR_NARANJA = colors.HexColor("#F9A825")  # Amarillo (más “institucional”)
 COLOR_ROJO = colors.HexColor("#B71C1C")
 COLOR_ENCABEZADO = colors.HexColor("#263238")
 COLOR_ENCABEZADO_2 = colors.HexColor("#37474F")
@@ -258,7 +259,7 @@ def build_pdf_report(
 
     criterio = (
         f"Criterio de color: Verde = avance ≥ {int(verde_desde)}%, "
-        f"Naranja = avance ≥ {int(naranja_desde)}% y < {int(verde_desde)}%, "
+        f"Amarillo = avance ≥ {int(naranja_desde)}% y < {int(verde_desde)}%, "
         f"Rojo = avance < {int(naranja_desde)}%."
     )
 
@@ -341,6 +342,14 @@ def build_pdf_report(
         style1.append(("BACKGROUND", (-1, i), (-1, i), c))
         style1.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style1.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
+
+        # ✅ CAMBIO 2: si Contabilidad == 0, pintar esa celda en rojo
+        contab_val = int(df_tipo.iloc[i-1]["Contabilidad"])
+        if contab_val == 0:
+            style1.append(("BACKGROUND", (2, i), (2, i), COLOR_ROJO))  # Columna "Contabilidad" = índice 2
+            style1.append(("TEXTCOLOR", (2, i), (2, i), colors.white))
+            style1.append(("FONTNAME", (2, i), (2, i), "Helvetica-Bold"))
+
     tbl1.setStyle(TableStyle(style1))
     elems.append(tbl1)
     elems.append(Spacer(1, 12))
@@ -384,6 +393,14 @@ def build_pdf_report(
         style2.append(("BACKGROUND", (-1, i), (-1, i), c))
         style2.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style2.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
+
+        # ✅ CAMBIO 2: si Contabilidad == 0, pintar esa celda en rojo
+        contab_val = int(det.iloc[i-1]["Contabilidad"])
+        if contab_val == 0:
+            style2.append(("BACKGROUND", (3, i), (3, i), COLOR_ROJO))  # Columna "Contabilidad" = índice 3
+            style2.append(("TEXTCOLOR", (3, i), (3, i), colors.white))
+            style2.append(("FONTNAME", (3, i), (3, i), "Helvetica-Bold"))
+
     tbl2.setStyle(TableStyle(style2))
     elems.append(tbl2)
     elems.append(Spacer(1, 10))
@@ -507,4 +524,3 @@ if st.button("🧾 Generar informe PDF", type="primary"):
         file_name=f"Informe_{region_name.replace(' ', '_')}_Encuestas.pdf",
         mime="application/pdf"
     )
-
