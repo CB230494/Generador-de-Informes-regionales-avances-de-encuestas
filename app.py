@@ -47,8 +47,8 @@ REGIONES_CATALOGO = [
 
 # Colores institucionales
 COLOR_VERDE = colors.HexColor("#1B5E20")
-# ✅ CAMBIO 1: lo que era naranja ahora será amarillo
-COLOR_NARANJA = colors.HexColor("#F9A825")  # Amarillo (más “institucional”)
+# ✅ Amarillo (lo que era naranja)
+COLOR_NARANJA = colors.HexColor("#F9A825")
 COLOR_ROJO = colors.HexColor("#B71C1C")
 COLOR_ENCABEZADO = colors.HexColor("#263238")
 COLOR_ENCABEZADO_2 = colors.HexColor("#37474F")
@@ -298,10 +298,15 @@ def build_pdf_report(
         elems.append(Paragraph(f"<b>{titulo_final}</b>", styles["TitleCenter"]))
         elems.append(Paragraph(subtitulo, styles["SubCenter"]))
 
-    # Línea de generación + corte
-    line = f"<b>Este reporte fue generado el</b> {generado_str}."
+    # ✅ CAMBIO (solo texto de leyendas)
+    # 1) Leyenda de generación (para Director(a) Regional)
+    # 2) Leyenda de toma de datos (corte con fecha+hora)
+    line = (
+        f"<b>Este reporte fue generado el día</b> {generado_str} "
+        f"<b>para el Director(a) Regional de la Dirección Regional</b> {region_name}."
+    )
     if corte:
-        line += f" &nbsp;&nbsp; | &nbsp;&nbsp; <b>Corte del día:</b> {corte}"
+        line += f" &nbsp;&nbsp; | &nbsp;&nbsp; <b>Los datos para este reporte fueron tomados el día</b> {corte}"
     elems.append(Paragraph(line, styles["Small"]))
     elems.append(Spacer(1, 10))
 
@@ -343,10 +348,10 @@ def build_pdf_report(
         style1.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style1.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
-        # ✅ CAMBIO 2: si Contabilidad == 0, pintar esa celda en rojo
+        # Si Contabilidad == 0, pintar esa celda en rojo
         contab_val = int(df_tipo.iloc[i-1]["Contabilidad"])
         if contab_val == 0:
-            style1.append(("BACKGROUND", (2, i), (2, i), COLOR_ROJO))  # Columna "Contabilidad" = índice 2
+            style1.append(("BACKGROUND", (2, i), (2, i), COLOR_ROJO))
             style1.append(("TEXTCOLOR", (2, i), (2, i), colors.white))
             style1.append(("FONTNAME", (2, i), (2, i), "Helvetica-Bold"))
 
@@ -374,7 +379,6 @@ def build_pdf_report(
             str(r["Estado"])
         ])
 
-    # Nota: repeatRows hace que el encabezado se repita si la tabla pasa a otra página
     tbl2 = Table(data2, repeatRows=1, colWidths=[2.1*inch, 0.9*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.7*inch])
     style2 = [
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO),
@@ -394,10 +398,10 @@ def build_pdf_report(
         style2.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style2.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
-        # ✅ CAMBIO 2: si Contabilidad == 0, pintar esa celda en rojo
+        # Si Contabilidad == 0, pintar esa celda en rojo
         contab_val = int(det.iloc[i-1]["Contabilidad"])
         if contab_val == 0:
-            style2.append(("BACKGROUND", (3, i), (3, i), COLOR_ROJO))  # Columna "Contabilidad" = índice 3
+            style2.append(("BACKGROUND", (3, i), (3, i), COLOR_ROJO))
             style2.append(("TEXTCOLOR", (3, i), (3, i), colors.white))
             style2.append(("FONTNAME", (3, i), (3, i), "Helvetica-Bold"))
 
@@ -405,7 +409,6 @@ def build_pdf_report(
     elems.append(tbl2)
     elems.append(Spacer(1, 10))
 
-    # Criterio de color al final (si la tabla se parte, quedará después del último pedazo)
     elems.append(Paragraph(criterio, styles["Tiny"]))
 
     doc.build(elems)
@@ -491,19 +494,16 @@ if df_all.empty:
     st.warning("No se detectaron filas. (Esto suele pasar si el PDF viene como imagen escaneada).")
     st.stop()
 
-# Misma región para todos los PDFs
 df_all["Región"] = region_name
 
 st.success(f"Filas detectadas: {len(df_all)}")
 st.dataframe(df_all.sort_values(["Delegación", "Tipo", "Distrito"]), use_container_width=True, height=320)
 
-# Resúmenes
 st.markdown("### 3) Resumen (pantalla)")
 df_tipo = agg_tipo(df_all)
 df_deleg = agg_delegacion_tipo(df_all)
 st.dataframe(df_tipo.sort_values("Tipo"), use_container_width=True)
 
-# Generar PDF
 st.markdown("### 4) Generar PDF")
 if st.button("🧾 Generar informe PDF", type="primary"):
     pdf_bytes = build_pdf_report(
