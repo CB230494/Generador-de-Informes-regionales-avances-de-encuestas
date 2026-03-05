@@ -239,11 +239,6 @@ def infer_corte(df_detalle: pd.DataFrame) -> str:
 
 
 def extraer_num_region(region_name: str) -> str:
-    """
-    Devuelve solo el número de la región desde textos tipo:
-    'Región 5', 'Región 1 Norte', 'Región 10', etc.
-    Si no encuentra número, devuelve el texto completo.
-    """
     m = re.search(r"Regi[oó]n\s*([0-9]{1,2})", str(region_name), re.IGNORECASE)
     return m.group(1) if m else str(region_name)
 
@@ -263,10 +258,7 @@ def build_pdf_report(
     generado_str = generado_dt.strftime("%d/%m/%Y")  # SIN hora
     corte = infer_corte(df_detalle)
 
-    # Título final
     titulo_final = f"{titulo_base} – {region_name}"
-
-    # Solo número para la frase "Región X"
     num_region = extraer_num_region(region_name)
 
     criterio = (
@@ -289,6 +281,7 @@ def build_pdf_report(
     styles.add(ParagraphStyle(name="H2x", parent=styles["Heading2"], fontSize=12, spaceAfter=6))
     styles.add(ParagraphStyle(name="Small", parent=styles["BodyText"], fontSize=9, leading=11))
     styles.add(ParagraphStyle(name="Tiny", parent=styles["BodyText"], fontSize=8, leading=10))
+    styles.add(ParagraphStyle(name="H3x", parent=styles["Heading3"], fontSize=11, spaceAfter=6))
 
     elems = []
 
@@ -310,10 +303,10 @@ def build_pdf_report(
         elems.append(Paragraph(f"<b>{titulo_final}</b>", styles["TitleCenter"]))
         elems.append(Paragraph(subtitulo, styles["SubCenter"]))
 
-    # ✅ CAMBIO: 1 texto por renglón + "Región {número}"
+    # 1 texto por renglón + "Región {número}"
     linea_1 = (
         f"<b>Este reporte fue generado el día</b> {generado_str} "
-        f"<b>para el Director(a) Regional de la Dirección Regional </b> {num_region}."
+        f"<b>para el Director(a) Regional de la Dirección Regional Región</b> {num_region}."
     )
     elems.append(Paragraph(linea_1, styles["Small"]))
 
@@ -361,7 +354,6 @@ def build_pdf_report(
         style1.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style1.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
-        # Si Contabilidad == 0, pintar esa celda en rojo
         contab_val = int(df_tipo.iloc[i-1]["Contabilidad"])
         if contab_val == 0:
             style1.append(("BACKGROUND", (2, i), (2, i), COLOR_ROJO))
@@ -370,6 +362,40 @@ def build_pdf_report(
 
     tbl1.setStyle(TableStyle(style1))
     elems.append(tbl1)
+    elems.append(Spacer(1, 10))
+
+    # =========================
+    # ✅ NUEVO: Totales regionales (Meta/Contabilidad/Pendiente/%/Estado)
+    # =========================
+    total_meta = int(df_tipo["Meta"].sum()) if not df_tipo.empty else 0
+    total_contab = int(df_tipo["Contabilidad"].sum()) if not df_tipo.empty else 0
+    total_pend = int(df_tipo["Pendiente"].sum()) if not df_tipo.empty else 0
+    total_pct = (total_contab / total_meta * 100.0) if total_meta else 0.0
+    total_estado = etiqueta_por_porcentaje(float(total_pct), verde_desde, naranja_desde)
+    total_color = color_por_porcentaje(float(total_pct), verde_desde, naranja_desde)
+
+    elems.append(Paragraph("Totales regionales", styles["H3x"]))
+
+    data_tot = [
+        ["Meta total", "Contabilidad total", "Pendiente total", "% Avance total", "Estado total"],
+        [fmt_int(total_meta), fmt_int(total_contab), fmt_int(total_pend), f"{total_pct:.1f}%", total_estado]
+    ]
+    tbl_tot = Table(data_tot, repeatRows=1, colWidths=[1.2*inch, 1.6*inch, 1.2*inch, 1.2*inch, 1.0*inch])
+    style_tot = [
+        ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO_2),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+        ("BACKGROUND", (3, 1), (3, 1), total_color),
+        ("TEXTCOLOR", (3, 1), (3, 1), colors.white),
+        ("BACKGROUND", (4, 1), (4, 1), total_color),
+        ("TEXTCOLOR", (4, 1), (4, 1), colors.white),
+    ]
+    tbl_tot.setStyle(TableStyle(style_tot))
+    elems.append(tbl_tot)
     elems.append(Spacer(1, 12))
 
     # =========================
@@ -411,7 +437,6 @@ def build_pdf_report(
         style2.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style2.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
-        # Si Contabilidad == 0, pintar esa celda en rojo
         contab_val = int(det.iloc[i-1]["Contabilidad"])
         if contab_val == 0:
             style2.append(("BACKGROUND", (3, i), (3, i), COLOR_ROJO))
@@ -537,6 +562,5 @@ if st.button("🧾 Generar informe PDF", type="primary"):
         file_name=f"Informe_{region_name.replace(' ', '_')}_Encuestas.pdf",
         mime="application/pdf"
     )
-
 
 
