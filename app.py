@@ -313,7 +313,7 @@ def build_pdf_report(
     # ✅ CAMBIO: 1 texto por renglón + "Región {número}"
     linea_1 = (
         f"<b>Este reporte fue generado el día</b> {generado_str} "
-        f"<b>para el Director(a) Regional de la Dirección Regional Región</b> {num_region}."
+        f"<b>para el Director(a) Regional de la Dirección Regional </b> {num_region}."
     )
     elems.append(Paragraph(linea_1, styles["Small"]))
 
@@ -537,3 +537,4 @@ if st.button("🧾 Generar informe PDF", type="primary"):
         file_name=f"Informe_{region_name.replace(' ', '_')}_Encuestas.pdf",
         mime="application/pdf"
     )
+
