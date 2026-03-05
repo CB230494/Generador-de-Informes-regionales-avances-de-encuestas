@@ -300,14 +300,14 @@ def build_pdf_report(
     # Línea de generación + corte
     line = f"<b>Este reporte fue generado el</b> {generado_str}."
     if corte:
-        line += f" &nbsp;&nbsp; | &nbsp;&nbsp; <b>Corte (según PDFs):</b> {corte}"
+        line += f" &nbsp;&nbsp; | &nbsp;&nbsp; <b>Corte del día:</b> {corte}"
     elems.append(Paragraph(line, styles["Small"]))
     elems.append(Spacer(1, 10))
 
     # =========================
     # Cuadro 1. Resumen por tipo
     # =========================
-    elems.append(Paragraph("Cuadro 1. Resumen por tipo", styles["H2x"]))
+    elems.append(Paragraph("Detalle a nivel regional", styles["H2x"]))
 
     df_tipo = df_tipo.copy().sort_values("Tipo")
     df_tipo["Estado"] = df_tipo["% Avance"].apply(lambda p: etiqueta_por_porcentaje(float(p), verde_desde, naranja_desde))
@@ -348,7 +348,7 @@ def build_pdf_report(
     # =========================
     # Cuadro 2. Detalle por delegación
     # =========================
-    elems.append(Paragraph("Cuadro 2. Detalle por delegación", styles["H2x"]))
+    elems.append(Paragraph("Detalle por delegación", styles["H2x"]))
 
     det = df_deleg.copy().sort_values(["Delegación", "Tipo"])
     det["Estado"] = det["% Avance"].apply(lambda p: etiqueta_por_porcentaje(float(p), verde_desde, naranja_desde))
@@ -507,3 +507,4 @@ if st.button("🧾 Generar informe PDF", type="primary"):
         file_name=f"Informe_{region_name.replace(' ', '_')}_Encuestas.pdf",
         mime="application/pdf"
     )
+
