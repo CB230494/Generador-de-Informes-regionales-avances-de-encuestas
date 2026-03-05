@@ -47,8 +47,7 @@ REGIONES_CATALOGO = [
 
 # Colores institucionales
 COLOR_VERDE = colors.HexColor("#1B5E20")
-# ✅ Amarillo (lo que era naranja)
-COLOR_NARANJA = colors.HexColor("#F9A825")
+COLOR_NARANJA = colors.HexColor("#F9A825")  # Amarillo
 COLOR_ROJO = colors.HexColor("#B71C1C")
 COLOR_ENCABEZADO = colors.HexColor("#263238")
 COLOR_ENCABEZADO_2 = colors.HexColor("#37474F")
@@ -239,6 +238,16 @@ def infer_corte(df_detalle: pd.DataFrame) -> str:
     return tmp["Corte"].value_counts().idxmax()
 
 
+def extraer_num_region(region_name: str) -> str:
+    """
+    Devuelve solo el número de la región desde textos tipo:
+    'Región 5', 'Región 1 Norte', 'Región 10', etc.
+    Si no encuentra número, devuelve el texto completo.
+    """
+    m = re.search(r"Regi[oó]n\s*([0-9]{1,2})", str(region_name), re.IGNORECASE)
+    return m.group(1) if m else str(region_name)
+
+
 def build_pdf_report(
     region_name: str,
     df_detalle: pd.DataFrame,
@@ -254,8 +263,11 @@ def build_pdf_report(
     generado_str = generado_dt.strftime("%d/%m/%Y")  # SIN hora
     corte = infer_corte(df_detalle)
 
-    # Título final (una sola línea, sin que se parta "Región 5")
+    # Título final
     titulo_final = f"{titulo_base} – {region_name}"
+
+    # Solo número para la frase "Región X"
+    num_region = extraer_num_region(region_name)
 
     criterio = (
         f"Criterio de color: Verde = avance ≥ {int(verde_desde)}%, "
@@ -298,16 +310,17 @@ def build_pdf_report(
         elems.append(Paragraph(f"<b>{titulo_final}</b>", styles["TitleCenter"]))
         elems.append(Paragraph(subtitulo, styles["SubCenter"]))
 
-    # ✅ CAMBIO (solo texto de leyendas)
-    # 1) Leyenda de generación (para Director(a) Regional)
-    # 2) Leyenda de toma de datos (corte con fecha+hora)
-    line = (
+    # ✅ CAMBIO: 1 texto por renglón + "Región {número}"
+    linea_1 = (
         f"<b>Este reporte fue generado el día</b> {generado_str} "
-        f"<b>para el Director(a) Regional de la Dirección Regional</b> {region_name}."
+        f"<b>para el Director(a) Regional de la Dirección Regional Región</b> {num_region}."
     )
+    elems.append(Paragraph(linea_1, styles["Small"]))
+
     if corte:
-        line += f" &nbsp;&nbsp; | &nbsp;&nbsp; <b>Los datos para este reporte fueron tomados el día</b> {corte}"
-    elems.append(Paragraph(line, styles["Small"]))
+        linea_2 = f"<b>Los datos para este reporte fueron tomados el día</b> {corte}"
+        elems.append(Paragraph(linea_2, styles["Small"]))
+
     elems.append(Spacer(1, 10))
 
     # =========================
