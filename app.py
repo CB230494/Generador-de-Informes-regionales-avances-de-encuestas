@@ -47,7 +47,7 @@ REGIONES_CATALOGO = [
 
 # Colores institucionales
 COLOR_VERDE = colors.HexColor("#1B5E20")
-COLOR_NARANJA = colors.HexColor("#F9A825")  # Amarillo
+COLOR_NARANJA = colors.HexColor("#F9A825")
 COLOR_ROJO = colors.HexColor("#B71C1C")
 COLOR_ENCABEZADO = colors.HexColor("#263238")
 COLOR_ENCABEZADO_2 = colors.HexColor("#37474F")
@@ -124,9 +124,12 @@ def parse_table_block_robust(header: ParsedHeader, block_text: str) -> List[Dict
 
     compact = " ".join(block_text.split())
 
+    # ✅ CORRECCIÓN:
+    # Ahora acepta barras "/", guiones "-", puntos ".", paréntesis y números
+    # en la columna que antes estaba pensada solo para nombres con letras/espacios.
     matches = re.findall(
         r"(Comunidad|Comercio|Policial)\s+"
-        r"([A-Za-zÁÉÍÓÚÑáéíóúñ\s]+?)\s+"
+        r"([A-Za-zÁÉÍÓÚÑáéíóúñ0-9\s\/\-\.\(\)]+?)\s+"
         r"(\d+)\s+(\d+)\s+(\d+)%\s+(\d+)",
         compact
     )
@@ -255,7 +258,7 @@ def build_pdf_report(
     naranja_desde: float,
 ) -> bytes:
     generado_dt = datetime.now()
-    generado_str = generado_dt.strftime("%d/%m/%Y")  # SIN hora
+    generado_str = generado_dt.strftime("%d/%m/%Y")
     corte = infer_corte(df_detalle)
 
     titulo_final = f"{titulo_base} – {region_name}"
@@ -285,7 +288,6 @@ def build_pdf_report(
 
     elems = []
 
-    # -------- Header: logo + titulo centrado --------
     if logo_pil:
         header_tbl = Table(
             [[
@@ -303,7 +305,6 @@ def build_pdf_report(
         elems.append(Paragraph(f"<b>{titulo_final}</b>", styles["TitleCenter"]))
         elems.append(Paragraph(subtitulo, styles["SubCenter"]))
 
-    # 1 texto por renglón + "Región {número}"
     linea_1 = (
         f"<b>Este reporte fue generado el día</b> {generado_str} "
         f"<b>para el Director(a) de la Dirección Regional </b> {num_region}."
@@ -345,7 +346,7 @@ def build_pdf_report(
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
     for i in range(1, len(data1)):
-        p = float(df_tipo.iloc[i-1]["% Avance"])
+        p = float(df_tipo.iloc[i - 1]["% Avance"])
         c = color_por_porcentaje(p, verde_desde, naranja_desde)
         style1.append(("BACKGROUND", (-2, i), (-2, i), c))
         style1.append(("TEXTCOLOR", (-2, i), (-2, i), colors.white))
@@ -354,7 +355,7 @@ def build_pdf_report(
         style1.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style1.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
-        contab_val = int(df_tipo.iloc[i-1]["Contabilidad"])
+        contab_val = int(df_tipo.iloc[i - 1]["Contabilidad"])
         if contab_val == 0:
             style1.append(("BACKGROUND", (2, i), (2, i), COLOR_ROJO))
             style1.append(("TEXTCOLOR", (2, i), (2, i), colors.white))
@@ -365,7 +366,7 @@ def build_pdf_report(
     elems.append(Spacer(1, 10))
 
     # =========================
-    # ✅ NUEVO: Totales regionales (Meta/Contabilidad/Pendiente/%/Estado)
+    # Totales regionales
     # =========================
     total_meta = int(df_tipo["Meta"].sum()) if not df_tipo.empty else 0
     total_contab = int(df_tipo["Contabilidad"].sum()) if not df_tipo.empty else 0
@@ -418,7 +419,11 @@ def build_pdf_report(
             str(r["Estado"])
         ])
 
-    tbl2 = Table(data2, repeatRows=1, colWidths=[2.1*inch, 0.9*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.7*inch])
+    tbl2 = Table(
+        data2,
+        repeatRows=1,
+        colWidths=[2.1*inch, 0.9*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.7*inch]
+    )
     style2 = [
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -428,7 +433,7 @@ def build_pdf_report(
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
     for i in range(1, len(data2)):
-        p = float(det.iloc[i-1]["% Avance"])
+        p = float(det.iloc[i - 1]["% Avance"])
         c = color_por_porcentaje(p, verde_desde, naranja_desde)
         style2.append(("BACKGROUND", (-2, i), (-2, i), c))
         style2.append(("TEXTCOLOR", (-2, i), (-2, i), colors.white))
@@ -437,7 +442,7 @@ def build_pdf_report(
         style2.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style2.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
-        contab_val = int(det.iloc[i-1]["Contabilidad"])
+        contab_val = int(det.iloc[i - 1]["Contabilidad"])
         if contab_val == 0:
             style2.append(("BACKGROUND", (3, i), (3, i), COLOR_ROJO))
             style2.append(("TEXTCOLOR", (3, i), (3, i), colors.white))
@@ -562,7 +567,3 @@ if st.button("🧾 Generar informe PDF", type="primary"):
         file_name=f"Informe_{region_name.replace(' ', '_')}_Encuestas.pdf",
         mime="application/pdf"
     )
-
-
-
-
