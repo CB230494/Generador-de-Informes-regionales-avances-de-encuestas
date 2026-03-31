@@ -124,9 +124,6 @@ def parse_table_block_robust(header: ParsedHeader, block_text: str) -> List[Dict
 
     compact = " ".join(block_text.split())
 
-    # ✅ CORRECCIÓN:
-    # Ahora acepta barras "/", guiones "-", puntos ".", paréntesis y números
-    # en la columna que antes estaba pensada solo para nombres con letras/espacios.
     matches = re.findall(
         r"(Comunidad|Comercio|Policial)\s+"
         r"([A-Za-zÁÉÍÓÚÑáéíóúñ0-9\s\/\-\.\(\)]+?)\s+"
@@ -176,20 +173,26 @@ def parse_pdf_report(file_name: str, file_bytes: bytes) -> Tuple[ParsedHeader, p
 def agg_tipo(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby(["Tipo"], dropna=False).agg(
         Meta=("Meta", "sum"),
-        Contabilidad=("Contabilidad", "sum"),
         Pendiente=("Pendiente", "sum"),
     ).reset_index()
-    g["% Avance"] = g.apply(lambda r: (r["Contabilidad"] / r["Meta"] * 100.0) if r["Meta"] else 0.0, axis=1)
+
+    g["% Avance"] = g.apply(
+        lambda r: ((r["Meta"] - r["Pendiente"]) / r["Meta"] * 100.0) if r["Meta"] else 0.0,
+        axis=1
+    )
     return g
 
 
 def agg_delegacion_tipo(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby(["Delegación", "Tipo"], dropna=False).agg(
         Meta=("Meta", "sum"),
-        Contabilidad=("Contabilidad", "sum"),
         Pendiente=("Pendiente", "sum"),
     ).reset_index()
-    g["% Avance"] = g.apply(lambda r: (r["Contabilidad"] / r["Meta"] * 100.0) if r["Meta"] else 0.0, axis=1)
+
+    g["% Avance"] = g.apply(
+        lambda r: ((r["Meta"] - r["Pendiente"]) / r["Meta"] * 100.0) if r["Meta"] else 0.0,
+        axis=1
+    )
     return g
 
 
@@ -210,6 +213,12 @@ def etiqueta_por_porcentaje(p: float, verde_desde: float, naranja_desde: float) 
     if p >= naranja_desde:
         return "MEDIO"
     return "BAJO"
+
+
+def color_por_pendiente_o_porcentaje(meta: int, pendiente: int, porcentaje: float, verde_desde: float, naranja_desde: float):
+    if meta > 0 and pendiente >= (meta * 0.5):
+        return COLOR_ROJO
+    return color_por_porcentaje(porcentaje, verde_desde, naranja_desde)
 
 
 # =========================
@@ -265,7 +274,8 @@ def build_pdf_report(
     num_region = extraer_num_region(region_name)
 
     criterio = (
-        f"Criterio de color: Verde = avance ≥ {int(verde_desde)}%, "
+        f"Criterio de color: Rojo si el pendiente es ≥ 50% de la meta. "
+        f"En los demás casos: Verde = avance ≥ {int(verde_desde)}%, "
         f"Amarillo = avance ≥ {int(naranja_desde)}% y < {int(verde_desde)}%, "
         f"Rojo = avance < {int(naranja_desde)}%."
     )
@@ -325,18 +335,17 @@ def build_pdf_report(
     df_tipo = df_tipo.copy().sort_values("Tipo")
     df_tipo["Estado"] = df_tipo["% Avance"].apply(lambda p: etiqueta_por_porcentaje(float(p), verde_desde, naranja_desde))
 
-    data1 = [["Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Estado"]]
+    data1 = [["Tipo", "Meta", "Pendiente", "% Avance", "Estado"]]
     for _, r in df_tipo.iterrows():
         data1.append([
             str(r["Tipo"]),
             fmt_int(r["Meta"]),
-            fmt_int(r["Contabilidad"]),
             fmt_int(r["Pendiente"]),
             f'{float(r["% Avance"]):.1f}%',
             str(r["Estado"])
         ])
 
-    tbl1 = Table(data1, repeatRows=1, colWidths=[1.2*inch, 1.0*inch, 1.2*inch, 1.0*inch, 0.9*inch, 0.8*inch])
+    tbl1 = Table(data1, repeatRows=1, colWidths=[1.4*inch, 1.2*inch, 1.2*inch, 1.0*inch, 1.0*inch])
     style1 = [
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO_2),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -346,8 +355,11 @@ def build_pdf_report(
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
     for i in range(1, len(data1)):
+        meta = int(df_tipo.iloc[i - 1]["Meta"])
+        pendiente = int(df_tipo.iloc[i - 1]["Pendiente"])
         p = float(df_tipo.iloc[i - 1]["% Avance"])
-        c = color_por_porcentaje(p, verde_desde, naranja_desde)
+        c = color_por_pendiente_o_porcentaje(meta, pendiente, p, verde_desde, naranja_desde)
+
         style1.append(("BACKGROUND", (-2, i), (-2, i), c))
         style1.append(("TEXTCOLOR", (-2, i), (-2, i), colors.white))
         style1.append(("FONTNAME", (-2, i), (-2, i), "Helvetica-Bold"))
@@ -355,8 +367,7 @@ def build_pdf_report(
         style1.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style1.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
-        contab_val = int(df_tipo.iloc[i - 1]["Contabilidad"])
-        if contab_val == 0:
+        if meta > 0 and pendiente >= (meta * 0.5):
             style1.append(("BACKGROUND", (2, i), (2, i), COLOR_ROJO))
             style1.append(("TEXTCOLOR", (2, i), (2, i), colors.white))
             style1.append(("FONTNAME", (2, i), (2, i), "Helvetica-Bold"))
@@ -369,19 +380,18 @@ def build_pdf_report(
     # Totales regionales
     # =========================
     total_meta = int(df_tipo["Meta"].sum()) if not df_tipo.empty else 0
-    total_contab = int(df_tipo["Contabilidad"].sum()) if not df_tipo.empty else 0
     total_pend = int(df_tipo["Pendiente"].sum()) if not df_tipo.empty else 0
-    total_pct = (total_contab / total_meta * 100.0) if total_meta else 0.0
+    total_pct = ((total_meta - total_pend) / total_meta * 100.0) if total_meta else 0.0
     total_estado = etiqueta_por_porcentaje(float(total_pct), verde_desde, naranja_desde)
-    total_color = color_por_porcentaje(float(total_pct), verde_desde, naranja_desde)
+    total_color = color_por_pendiente_o_porcentaje(total_meta, total_pend, float(total_pct), verde_desde, naranja_desde)
 
     elems.append(Paragraph("Totales regionales", styles["H3x"]))
 
     data_tot = [
-        ["Meta total", "Contabilidad total", "Pendiente total", "% Avance total", "Estado total"],
-        [fmt_int(total_meta), fmt_int(total_contab), fmt_int(total_pend), f"{total_pct:.1f}%", total_estado]
+        ["Meta total", "Pendiente total", "% Avance total", "Estado total"],
+        [fmt_int(total_meta), fmt_int(total_pend), f"{total_pct:.1f}%", total_estado]
     ]
-    tbl_tot = Table(data_tot, repeatRows=1, colWidths=[1.2*inch, 1.6*inch, 1.2*inch, 1.2*inch, 1.0*inch])
+    tbl_tot = Table(data_tot, repeatRows=1, colWidths=[1.4*inch, 1.6*inch, 1.4*inch, 1.2*inch])
     style_tot = [
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO_2),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -390,11 +400,16 @@ def build_pdf_report(
         ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+        ("BACKGROUND", (2, 1), (2, 1), total_color),
+        ("TEXTCOLOR", (2, 1), (2, 1), colors.white),
         ("BACKGROUND", (3, 1), (3, 1), total_color),
         ("TEXTCOLOR", (3, 1), (3, 1), colors.white),
-        ("BACKGROUND", (4, 1), (4, 1), total_color),
-        ("TEXTCOLOR", (4, 1), (4, 1), colors.white),
     ]
+
+    if total_meta > 0 and total_pend >= (total_meta * 0.5):
+        style_tot.append(("BACKGROUND", (1, 1), (1, 1), COLOR_ROJO))
+        style_tot.append(("TEXTCOLOR", (1, 1), (1, 1), colors.white))
+
     tbl_tot.setStyle(TableStyle(style_tot))
     elems.append(tbl_tot)
     elems.append(Spacer(1, 12))
@@ -407,13 +422,12 @@ def build_pdf_report(
     det = df_deleg.copy().sort_values(["Delegación", "Tipo"])
     det["Estado"] = det["% Avance"].apply(lambda p: etiqueta_por_porcentaje(float(p), verde_desde, naranja_desde))
 
-    data2 = [["Delegación", "Tipo", "Meta", "Contabilidad", "Pendiente", "% Avance", "Estado"]]
+    data2 = [["Delegación", "Tipo", "Meta", "Pendiente", "% Avance", "Estado"]]
     for _, r in det.iterrows():
         data2.append([
             str(r["Delegación"]),
             str(r["Tipo"]),
             fmt_int(r["Meta"]),
-            fmt_int(r["Contabilidad"]),
             fmt_int(r["Pendiente"]),
             f'{float(r["% Avance"]):.1f}%',
             str(r["Estado"])
@@ -422,7 +436,7 @@ def build_pdf_report(
     tbl2 = Table(
         data2,
         repeatRows=1,
-        colWidths=[2.1*inch, 0.9*inch, 0.9*inch, 1.1*inch, 0.9*inch, 0.9*inch, 0.7*inch]
+        colWidths=[2.4*inch, 1.0*inch, 0.9*inch, 1.0*inch, 0.9*inch, 0.8*inch]
     )
     style2 = [
         ("BACKGROUND", (0, 0), (-1, 0), COLOR_ENCABEZADO),
@@ -433,8 +447,11 @@ def build_pdf_report(
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
     for i in range(1, len(data2)):
+        meta = int(det.iloc[i - 1]["Meta"])
+        pendiente = int(det.iloc[i - 1]["Pendiente"])
         p = float(det.iloc[i - 1]["% Avance"])
-        c = color_por_porcentaje(p, verde_desde, naranja_desde)
+        c = color_por_pendiente_o_porcentaje(meta, pendiente, p, verde_desde, naranja_desde)
+
         style2.append(("BACKGROUND", (-2, i), (-2, i), c))
         style2.append(("TEXTCOLOR", (-2, i), (-2, i), colors.white))
         style2.append(("FONTNAME", (-2, i), (-2, i), "Helvetica-Bold"))
@@ -442,8 +459,7 @@ def build_pdf_report(
         style2.append(("TEXTCOLOR", (-1, i), (-1, i), colors.white))
         style2.append(("FONTNAME", (-1, i), (-1, i), "Helvetica-Bold"))
 
-        contab_val = int(det.iloc[i - 1]["Contabilidad"])
-        if contab_val == 0:
+        if meta > 0 and pendiente >= (meta * 0.5):
             style2.append(("BACKGROUND", (3, i), (3, i), COLOR_ROJO))
             style2.append(("TEXTCOLOR", (3, i), (3, i), colors.white))
             style2.append(("FONTNAME", (3, i), (3, i), "Helvetica-Bold"))
@@ -540,7 +556,11 @@ if df_all.empty:
 df_all["Región"] = region_name
 
 st.success(f"Filas detectadas: {len(df_all)}")
-st.dataframe(df_all.sort_values(["Delegación", "Tipo", "Distrito"]), use_container_width=True, height=320)
+
+# Vista en pantalla sin columna Contabilidad
+cols_pantalla = ["Delegación", "Fecha", "Hora", "Tipo", "Distrito", "Meta", "Pendiente", "% Avance", "Archivo", "Región"]
+cols_pantalla = [c for c in cols_pantalla if c in df_all.columns]
+st.dataframe(df_all[cols_pantalla].sort_values(["Delegación", "Tipo", "Distrito"]), use_container_width=True, height=320)
 
 st.markdown("### 3) Resumen (pantalla)")
 df_tipo = agg_tipo(df_all)
